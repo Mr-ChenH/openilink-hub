@@ -399,15 +399,15 @@ func (s *Server) handleBotSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	canSend, reason := s.checkSendability(botID, msg.Recipient, inst.Status())
-	if !canSend {
-		jsonError(w, reason, http.StatusConflict)
-		return
-	}
-
 	msg, msgType, err := parseSendRequest(r)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	canSend, reason := s.checkSendability(botID, msg.Recipient, inst.Status())
+	if !canSend {
+		jsonError(w, reason, http.StatusConflict)
 		return
 	}
 
