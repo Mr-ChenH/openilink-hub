@@ -675,10 +675,42 @@ func TestMessageCRUD(t *testing.T, s store.Store) {
 		}
 	})
 
+	t.Run("GetLatestContextTokenForRecipient", func(t *testing.T) {
+		msgID := int64(2500)
+		if _, err := s.SaveMessage(&store.Message{
+			BotID:        b.ID,
+			Direction:    "inbound",
+			MessageID:    &msgID,
+			FromUserID:   "sender2",
+			ContextToken: "ctx_token_2",
+		}); err != nil {
+			t.Fatalf("SaveMessage sender2: %v", err)
+		}
+
+		if got := s.GetLatestContextTokenForRecipient(b.ID, "sender1"); got != "ctx_token_1" {
+			t.Errorf("sender1 context_token = %q, want %q", got, "ctx_token_1")
+		}
+		if got := s.GetLatestContextTokenForRecipient(b.ID, "sender2"); got != "ctx_token_2" {
+			t.Errorf("sender2 context_token = %q, want %q", got, "ctx_token_2")
+		}
+		if got := s.GetLatestContextTokenForRecipient(b.ID, "unknown"); got != "" {
+			t.Errorf("unknown context_token = %q, want empty", got)
+		}
+	})
+
 	t.Run("HasFreshContextToken", func(t *testing.T) {
 		has := s.HasFreshContextToken(b.ID, 1*time.Hour)
 		if !has {
 			t.Error("expected HasFreshContextToken to be true for recently saved message")
+		}
+	})
+
+	t.Run("HasFreshContextTokenForRecipient", func(t *testing.T) {
+		if !s.HasFreshContextTokenForRecipient(b.ID, "sender1", 1*time.Hour) {
+			t.Error("expected sender1 to have a fresh context token")
+		}
+		if s.HasFreshContextTokenForRecipient(b.ID, "unknown", 1*time.Hour) {
+			t.Error("unknown recipient should not have a fresh context token")
 		}
 	})
 
@@ -1738,7 +1770,7 @@ func TestCredentialCRUD(t *testing.T, s store.Store) {
 		c := &store.Credential{
 			ID:              "cred_001",
 			UserID:          u.ID,
-			PublicKey:        []byte("pubkey123"),
+			PublicKey:       []byte("pubkey123"),
 			AttestationType: "none",
 			Transport:       "usb",
 			SignCount:       0,

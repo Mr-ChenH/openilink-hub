@@ -7,9 +7,9 @@ import (
 	"net/http"
 
 	"github.com/gorilla/websocket"
-	"github.com/openilink/openilink-hub/internal/store"
 	"github.com/openilink/openilink-hub/internal/provider"
 	"github.com/openilink/openilink-hub/internal/relay"
+	"github.com/openilink/openilink-hub/internal/store"
 )
 
 var upgrader = websocket.Upgrader{
@@ -108,7 +108,7 @@ func (s *Server) SetupUpstreamHandler() relay.UpstreamHandler {
 				return
 			}
 
-			ctxToken := s.Store.GetLatestContextToken(conn.BotID)
+			ctxToken := s.contextTokenForRecipient(conn.BotID, data.Recipient)
 			clientID, err := inst.Send(context.Background(), provider.OutboundMessage{
 				Recipient:    data.Recipient,
 				Text:         data.Text,

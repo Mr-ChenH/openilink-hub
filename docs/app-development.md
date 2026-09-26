@@ -404,6 +404,36 @@ If no `code_challenge` was provided during authorize, the code exchange succeeds
 
 **Authentication**: `Authorization: Bearer {app_token}`
 
+### Apprise Custom JSON
+
+Any App installation with the `message:write` scope gets an installation-specific
+Apprise Custom JSON URL on its **Token & Usage** page. The URL uses the
+installation `app_token` as the HTTP Basic username, so a notification is routed
+to the Bot where that App is installed:
+
+```text
+jsons://<app_token>:x@hub.example.com/bot/v1/apprise
+```
+
+Apprise posts its standard payload:
+
+```json
+{"version":"1.0","title":"Disk alert","message":"Usage is 95%","type":"warning"}
+```
+
+The Hub sends `title` and `message` as a WeChat text message. Set a recipient in
+the installation config with `{"recipient":"user@im.wechat"}`, or append
+`?to=user%40im.wechat` to the Apprise URL. Without either value, the provider's
+default recipient is used. The target user must have sent a recent message so a
+valid `context_token` is available.
+
+Example:
+
+```bash
+apprise -b "Usage is 95%" -t "Disk alert" \
+  "jsons://<app_token>:x@hub.example.com/bot/v1/apprise"
+```
+
 ### Send Message
 
 ```

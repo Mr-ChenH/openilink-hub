@@ -23,7 +23,7 @@ func (m *mockMessageStore) ListChannelMessages(channelID, sender string, limit i
 func (m *mockMessageStore) SaveMessage(_ *store.Message) (store.SaveResult, error) {
 	return store.SaveResult{}, nil
 }
-func (m *mockMessageStore) GetMessage(_ int64) (*store.Message, error)     { return nil, nil }
+func (m *mockMessageStore) GetMessage(_ int64) (*store.Message, error) { return nil, nil }
 func (m *mockMessageStore) ListMessages(_ string, _ int, _ int64) ([]store.Message, error) {
 	return nil, nil
 }
@@ -33,12 +33,18 @@ func (m *mockMessageStore) ListMessagesBySender(_, _ string, _ int) ([]store.Mes
 func (m *mockMessageStore) GetMessagesSince(_ string, _ int64, _ int) ([]store.Message, error) {
 	return nil, nil
 }
-func (m *mockMessageStore) GetLatestContextToken(_ string) string                        { return "" }
-func (m *mockMessageStore) HasFreshContextToken(_ string, _ time.Duration) bool          { return false }
+func (m *mockMessageStore) GetLatestContextToken(_ string) string { return "" }
+func (m *mockMessageStore) GetLatestContextTokenForRecipient(_, _ string) string {
+	return ""
+}
+func (m *mockMessageStore) HasFreshContextToken(_ string, _ time.Duration) bool { return false }
+func (m *mockMessageStore) HasFreshContextTokenForRecipient(_, _ string, _ time.Duration) bool {
+	return false
+}
 func (m *mockMessageStore) BatchHasFreshContextToken(_ []string, _ time.Duration) map[string]bool {
 	return nil
 }
-func (m *mockMessageStore) UpdateMediaStatus(_, _ string, _ json.RawMessage) error   { return nil }
+func (m *mockMessageStore) UpdateMediaStatus(_, _ string, _ json.RawMessage) error { return nil }
 func (m *mockMessageStore) UpdateMediaStatusByID(_ int64, _ string, _ json.RawMessage) error {
 	return nil
 }

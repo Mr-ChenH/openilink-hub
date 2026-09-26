@@ -27,10 +27,10 @@ type Manager struct {
 	instances map[string]*Instance
 	store     store.Store
 	hub       *relay.Hub
-	aiSink    *sink.AI            // AI sink (bot-level)
-	storage   storage.Store       // optional, for media files
-	baseURL   string              // Hub origin for proxy URLs
-	dlSem     chan struct{}        // semaphore for concurrent media downloads
+	aiSink    *sink.AI                // AI sink (bot-level)
+	storage   storage.Store           // optional, for media files
+	baseURL   string                  // Hub origin for proxy URLs
+	dlSem     chan struct{}           // semaphore for concurrent media downloads
 	appDisp   *appdelivery.Dispatcher // app event delivery
 	appWSHub  *appdelivery.WSHub      // app WebSocket connections
 	pushHub   *push.Hub               // browser push WebSocket
@@ -70,11 +70,8 @@ func (m *Manager) StartAll(ctx context.Context) {
 		if len(b.Credentials) == 0 || string(b.Credentials) == "{}" {
 			continue
 		}
-		// Don't auto-start bots with expired sessions — need manual re-bind
-		if b.Status == "session_expired" {
-			slog.Info("skip expired bot", "bot", b.ID)
-			continue
-		}
+		// Always resume the monitor. A previous -14 is a one-hour cooldown in
+		// the official client, not a terminal credential state.
 		if err := m.StartBot(ctx, &b); err != nil {
 			slog.Error("failed to start bot", "bot", b.ID, "err", err)
 		}
@@ -457,7 +454,7 @@ func (m *Manager) buildDBMessage(botDBID string, channelID *string, msg provider
 		ToUserID:     msg.Recipient,
 		CreateTimeMs: &msg.Timestamp,
 		SessionID:    msg.SessionID,
-		GroupID:       msg.GroupID,
+		GroupID:      msg.GroupID,
 		MessageState: msg.MessageState,
 		ItemList:     itemList,
 		ContextToken: msg.ContextToken,
@@ -647,7 +644,6 @@ func (m *Manager) downloadMedia(inst *Instance, msg provider.InboundMessage, msg
 	slog.Info("media download done", "bot", inst.DBID, "msg", msg.ExternalID, "status", status)
 }
 
-
 // deliverToAI runs the AI sink at bot level, independent of channel matching.
 func (m *Manager) deliverToAI(inst *Instance, msg provider.InboundMessage, p parsedMessage, msgID int64, tracer *store.Tracer, rootSpan *store.SpanBuilder) {
 	if m.aiSink == nil || !inst.AIEnabled {
@@ -810,7 +806,6 @@ func mediaContentType(itemType string) string {
 		return "application/octet-stream"
 	}
 }
-
 
 func convertRelayItem(item provider.MessageItem) relay.MessageItem {
 	ri := relay.MessageItem{

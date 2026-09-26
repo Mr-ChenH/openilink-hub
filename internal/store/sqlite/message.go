@@ -155,11 +155,35 @@ func (db *DB) GetLatestContextToken(botID string) string {
 	return token
 }
 
+func (db *DB) GetLatestContextTokenForRecipient(botID, recipient string) string {
+	if recipient == "" {
+		return db.GetLatestContextToken(botID)
+	}
+	var token string
+	db.QueryRow(
+		"SELECT context_token FROM messages WHERE bot_id = ? AND from_user_id = ? AND context_token != '' ORDER BY id DESC LIMIT 1",
+		botID, recipient,
+	).Scan(&token)
+	return token
+}
+
 func (db *DB) HasFreshContextToken(botID string, maxAge time.Duration) bool {
 	var count int
 	db.QueryRow(
 		"SELECT COUNT(*) FROM messages WHERE bot_id = ? AND context_token != '' AND created_at > ? - ? LIMIT 1",
 		botID, db.now(), int(maxAge.Seconds()),
+	).Scan(&count)
+	return count > 0
+}
+
+func (db *DB) HasFreshContextTokenForRecipient(botID, recipient string, maxAge time.Duration) bool {
+	if recipient == "" {
+		return db.HasFreshContextToken(botID, maxAge)
+	}
+	var count int
+	db.QueryRow(
+		"SELECT COUNT(*) FROM messages WHERE bot_id = ? AND from_user_id = ? AND context_token != '' AND created_at > ? - ? LIMIT 1",
+		botID, recipient, db.now(), int(maxAge.Seconds()),
 	).Scan(&count)
 	return count > 0
 }

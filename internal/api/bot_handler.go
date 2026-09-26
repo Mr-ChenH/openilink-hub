@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	ilinkProvider "github.com/openilink/openilink-hub/internal/provider/ilink"
 	"github.com/openilink/openilink-hub/internal/auth"
-	"github.com/openilink/openilink-hub/internal/store"
 	"github.com/openilink/openilink-hub/internal/provider"
+	ilinkProvider "github.com/openilink/openilink-hub/internal/provider/ilink"
+	"github.com/openilink/openilink-hub/internal/store"
 )
 
 func (s *Server) handleListBots(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +92,8 @@ const contextTokenMaxAge = 24 * time.Hour
 
 // checkSendStatus is a pure function that determines send capability from pre-fetched data.
 func checkSendStatus(status string, hasFreshToken bool) (bool, string) {
-	if status == "session_expired" {
-		return false, "会话已过期，请先在微信中发送一条消息以恢复连接，若仍无法恢复请重新扫码绑定"
+	if status == "cooldown" || status == "session_expired" {
+		return false, "微信侧会话冷却中，Bot 将在约一小时后自动重试；也可重新扫码立即换取授权"
 	}
 	if status != "connected" {
 		return false, "Bot 未连接"
@@ -105,9 +105,17 @@ func checkSendStatus(status string, hasFreshToken bool) (bool, string) {
 }
 
 // checkSendability queries the DB and returns send capability for a single bot.
-func (s *Server) checkSendability(botID, status string) (bool, string) {
-	hasFresh := s.Store.HasFreshContextToken(botID, contextTokenMaxAge)
-	return checkSendStatus(status, hasFresh)
+func (s *Server) checkSendability(botID, recipient, status string) (bool, string) {
+	hasFresh := s.Store.HasFreshContextTokenForRecipient(botID, recipient, contextTokenMaxAge)
+	canSend, reason := checkSendStatus(status, hasFresh)
+	if !canSend && status == "connected" && recipient != "" && !hasFresh {
+		return false, "暂无法发送：该联系人需要先给 Bot 发一条消息"
+	}
+	return canSend, reason
+}
+
+func (s *Server) contextTokenForRecipient(botID, recipient string) string {
+	return s.Store.GetLatestContextTokenForRecipient(botID, recipient)
 }
 
 func (s *Server) handleBindStart(w http.ResponseWriter, r *http.Request) {
@@ -269,8 +277,9 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if bot.Status == "session_expired" {
-		jsonError(w, "会话已过期，请先在微信中发送一条消息以恢复连接，若仍无法恢复请重新扫码绑定", http.StatusConflict)
+	if bot.Status == "cooldown" || bot.Status == "session_expired" {
+		s.BotManager.StartBot(context.Background(), bot)
+		jsonOK(w)
 		return
 	}
 
@@ -382,15 +391,15 @@ func (s *Server) handleBotSend(w http.ResponseWriter, r *http.Request) {
 
 	inst, ok := s.BotManager.GetInstance(botID)
 	if !ok {
-		if bot.Status == "session_expired" {
-			jsonError(w, "会话已过期，请先在微信中发送一条消息以恢复连接，若仍无法恢复请重新扫码绑定", http.StatusConflict)
+		if bot.Status == "cooldown" || bot.Status == "session_expired" {
+			jsonError(w, "微信侧会话冷却中，Bot 将自动重试", http.StatusConflict)
 		} else {
 			jsonError(w, "Bot 未连接", http.StatusServiceUnavailable)
 		}
 		return
 	}
 
-	canSend, reason := s.checkSendability(botID, inst.Status())
+	canSend, reason := s.checkSendability(botID, msg.Recipient, inst.Status())
 	if !canSend {
 		jsonError(w, reason, http.StatusConflict)
 		return
@@ -404,7 +413,7 @@ func (s *Server) handleBotSend(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-fill context_token from latest message if not provided
 	if msg.ContextToken == "" {
-		msg.ContextToken = s.Store.GetLatestContextToken(botID)
+		msg.ContextToken = s.contextTokenForRecipient(botID, msg.Recipient)
 	}
 
 	clientID, err := inst.Send(r.Context(), msg)

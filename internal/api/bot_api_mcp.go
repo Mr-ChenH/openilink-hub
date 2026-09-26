@@ -134,18 +134,18 @@ func (s *Server) mcpSendMessage(ctx context.Context, req mcp.CallToolRequest) (*
 		if err != nil {
 			return mcp.NewToolResultError("bot not found"), nil
 		}
-		if bot.Status == "session_expired" {
-			return mcp.NewToolResultError("bot session expired"), nil
+		if bot.Status == "cooldown" || bot.Status == "session_expired" {
+			return mcp.NewToolResultError("bot is cooling down and will retry automatically"), nil
 		}
 		return mcp.NewToolResultError("bot not connected"), nil
 	}
 
-	if canSend, reason := s.checkSendability(inst.BotID, botInst.Status()); !canSend {
+	if canSend, reason := s.checkSendability(inst.BotID, to, botInst.Status()); !canSend {
 		return mcp.NewToolResultError(reason), nil
 	}
 
 	traceID := generateTraceID()
-	contextToken := s.Store.GetLatestContextToken(inst.BotID)
+	contextToken := s.contextTokenForRecipient(inst.BotID, to)
 
 	// Build outbound message
 	outMsg := provider.OutboundMessage{

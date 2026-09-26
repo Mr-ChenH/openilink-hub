@@ -460,6 +460,29 @@ function TokenSection({ app, inst }: { app: any; inst: any }) {
   }
 
   const maskedToken = token ? token.slice(0, 8) + "****" + token.slice(-4) : "---";
+  const installationScopes: string[] = Array.isArray(inst.scopes)
+    ? inst.scopes
+    : (() => {
+        try {
+          return JSON.parse(inst.scopes || "[]");
+        } catch {
+          return [];
+        }
+      })();
+  const supportsApprise = installationScopes.includes("message:write");
+  const appriseScheme = window.location.protocol === "https:" ? "jsons" : "json";
+  const appriseRecipient = (() => {
+    try {
+      const config =
+        typeof inst.config === "string" ? JSON.parse(inst.config || "{}") : inst.config || {};
+      return String(config.recipient || "").trim();
+    } catch {
+      return "";
+    }
+  })();
+  const appriseURL = `${appriseScheme}://${encodeURIComponent(token || "<app_token>")}:x@${window.location.host}/bot/v1/apprise${
+    appriseRecipient ? `?to=${encodeURIComponent(appriseRecipient)}` : ""
+  }`;
 
   function renderGuide(): string | null {
     if (app.guide) {
@@ -595,6 +618,33 @@ function TokenSection({ app, inst }: { app: any; inst: any }) {
           </div>
         </CardContent>
       </Card>
+
+      {supportsApprise ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Apprise JSON</CardTitle>
+            <CardDescription>将此 URL 添加为 Apprise 的自定义 JSON 通知服务。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-2 p-2 rounded-md border bg-background">
+              <code className="text-xs font-mono flex-1 break-all select-all">
+                {showToken
+                  ? appriseURL
+                  : `${appriseScheme}://${maskedToken}:x@${window.location.host}/bot/v1/apprise`}
+              </code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => handleCopy(appriseURL)}
+                aria-label="复制 Apprise URL"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {guideText ? (
         <Card>
@@ -744,7 +794,15 @@ function AppConfigForm({ app, inst, onUpdate }: { app: any; inst: any; onUpdate:
 
 // ==================== Config Section ====================
 
-function ConfigSection({ inst, onUninstall, queryClient }: { inst: any; onUninstall: () => void; queryClient: QueryClient }) {
+function ConfigSection({
+  inst,
+  onUninstall,
+  queryClient,
+}: {
+  inst: any;
+  onUninstall: () => void;
+  queryClient: QueryClient;
+}) {
   const { toast } = useToast();
   const [showUninstallDialog, setShowUninstallDialog] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
@@ -869,26 +927,30 @@ function EventLogsSection({
       </div>
 
       {/* Show hint when logs contain 403/4xx errors */}
-      {!loading && logs.some((l) => {
-        const code = l.status_code || l.status;
-        return code >= 400 && code < 500;
-      }) && (
-        <div className="rounded-lg border border-orange-200 bg-orange-50 dark:border-orange-900 dark:bg-orange-950/30 p-3 text-xs text-muted-foreground space-y-1">
-          <p className="font-medium text-orange-700 dark:text-orange-400">部分事件投递失败</p>
-          <p>如果应用来自远程市场，4xx 错误通常是远程应用服务器的配置问题。请联系应用开发者确认 Webhook 地址和权限配置是否正确。</p>
-          {homepage ? (
-            <a
-              href={homepage}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-orange-700 hover:underline dark:text-orange-400"
-            >
-              <ExternalLink className="h-3 w-3" />
-              前往应用主页
-            </a>
-          ) : null}
-        </div>
-      )}
+      {!loading &&
+        logs.some((l) => {
+          const code = l.status_code || l.status;
+          return code >= 400 && code < 500;
+        }) && (
+          <div className="rounded-lg border border-orange-200 bg-orange-50 dark:border-orange-900 dark:bg-orange-950/30 p-3 text-xs text-muted-foreground space-y-1">
+            <p className="font-medium text-orange-700 dark:text-orange-400">部分事件投递失败</p>
+            <p>
+              如果应用来自远程市场，4xx 错误通常是远程应用服务器的配置问题。请联系应用开发者确认
+              Webhook 地址和权限配置是否正确。
+            </p>
+            {homepage ? (
+              <a
+                href={homepage}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-orange-700 hover:underline dark:text-orange-400"
+              >
+                <ExternalLink className="h-3 w-3" />
+                前往应用主页
+              </a>
+            ) : null}
+          </div>
+        )}
 
       <Card className="overflow-hidden">
         {loading ? (

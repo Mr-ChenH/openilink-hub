@@ -251,7 +251,15 @@ func (s *Store) GetLatestContextToken(botID string) string {
 	return "mock-context-token"
 }
 
+func (s *Store) GetLatestContextTokenForRecipient(botID, recipient string) string {
+	return s.GetLatestContextToken(botID)
+}
+
 func (s *Store) HasFreshContextToken(botID string, maxAge time.Duration) bool {
+	return true
+}
+
+func (s *Store) HasFreshContextTokenForRecipient(botID, recipient string, maxAge time.Duration) bool {
 	return true
 }
 

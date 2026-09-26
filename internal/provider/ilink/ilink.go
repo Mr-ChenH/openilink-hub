@@ -1,20 +1,24 @@
 package ilink
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand/v2"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
-
-	"bytes"
-	"encoding/base64"
-	"strings"
 	"time"
 
-	ilink "github.com/openilink/openilink-sdk-go"
 	"github.com/openilink/openilink-hub/internal/provider"
+	ilink "github.com/openilink/openilink-sdk-go"
 	"github.com/youthlin/silk"
 )
 
@@ -63,6 +67,7 @@ func (p *Provider) Start(ctx context.Context, opts provider.StartOptions) error 
 
 	clientOpts := []ilink.Option{
 		ilink.WithSILKDecoder(decodeSILK),
+		ilink.WithVersion("2.4.6"),
 	}
 	if creds.BaseURL != "" {
 		clientOpts = append(clientOpts, ilink.WithBaseURL(creds.BaseURL))
@@ -78,6 +83,13 @@ func (p *Provider) Start(ctx context.Context, opts provider.StartOptions) error 
 	p.status.Store("connected")
 	if opts.OnStatus != nil {
 		opts.OnStatus("connected")
+	}
+
+	// The official 2.4.6 client announces its lifecycle on a best-effort basis.
+	// This does not refresh an expired token, but keeps the server-side channel
+	// state aligned across normal restarts and long-running deployments.
+	if err := p.notifyLifecycle(ctx, "notifystart"); err != nil {
+		slog.Warn("ilink notify start failed", "err", err)
 	}
 
 	go func() {
@@ -105,32 +117,35 @@ func (p *Provider) Start(ctx context.Context, opts provider.StartOptions) error 
 				slog.Warn("ilink monitor error", "err", err)
 			},
 			OnSessionExpired: func() {
-				slog.Error("ilink session expired")
-				p.status.Store("session_expired")
+				slog.Warn("ilink bot token stale; entering one-hour cooldown")
+				p.status.Store("cooldown")
 				if opts.OnStatus != nil {
-					opts.OnStatus("session_expired")
+					opts.OnStatus("cooldown")
 				}
 			},
 			OnResponse: func(resp *ilink.GetUpdatesResp) {
+				if p.Status() == "cooldown" {
+					p.status.Store("connected")
+					if opts.OnStatus != nil {
+						opts.OnStatus("connected")
+					}
+				}
 				if raw := resp.RawResponse(); raw != nil {
 					lastRawBody = raw.Body
 				}
 			},
 		})
 
-		// Don't overwrite session_expired — that's a terminal state
-		if p.Status() != "session_expired" {
-			var newStatus string
-			if err != nil && err != context.Canceled {
-				slog.Error("ilink monitor stopped", "err", err)
-				newStatus = "error"
-			} else {
-				newStatus = "disconnected"
-			}
-			p.status.Store(newStatus)
-			if opts.OnStatus != nil {
-				opts.OnStatus(newStatus)
-			}
+		var newStatus string
+		if err != nil && err != context.Canceled {
+			slog.Error("ilink monitor stopped", "err", err)
+			newStatus = "error"
+		} else {
+			newStatus = "disconnected"
+		}
+		p.status.Store(newStatus)
+		if opts.OnStatus != nil {
+			opts.OnStatus(newStatus)
 		}
 	}()
 
@@ -138,9 +153,70 @@ func (p *Provider) Start(ctx context.Context, opts provider.StartOptions) error 
 }
 
 func (p *Provider) Stop() {
+	if p.client != nil && p.Status() != "cooldown" && p.Status() != "session_expired" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := p.notifyLifecycle(ctx, "notifystop"); err != nil {
+			slog.Warn("ilink notify stop failed", "err", err)
+		}
+		cancel()
+	}
 	if p.cancel != nil {
 		p.cancel()
 	}
+}
+
+func (p *Provider) notifyLifecycle(ctx context.Context, action string) error {
+	if p.client == nil || p.creds.BotToken == "" {
+		return nil
+	}
+	baseURL := p.creds.BaseURL
+	if baseURL == "" {
+		baseURL = ilink.DefaultBaseURL
+	}
+	endpoint, err := url.JoinPath(baseURL, "ilink/bot/msg/notify"+action)
+	if err != nil {
+		return fmt.Errorf("build lifecycle url: %w", err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"base_info": map[string]string{"channel_version": "2.4.6"},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("AuthorizationType", "ilink_bot_token")
+	req.Header.Set("Authorization", "Bearer "+p.creds.BotToken)
+	req.Header.Set("iLink-App-Id", "bot")
+	req.Header.Set("iLink-App-ClientVersion", "132102")
+	uin := strconv.FormatUint(uint64(rand.Uint32()), 10)
+	req.Header.Set("X-WECHAT-UIN", base64.StdEncoding.EncodeToString([]byte(uin)))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("lifecycle http %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Ret    int    `json:"ret"`
+		ErrMsg string `json:"errmsg"`
+	}
+	if len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("decode lifecycle response: %w", err)
+		}
+	}
+	if result.Ret != 0 {
+		return fmt.Errorf("lifecycle ret=%d: %s", result.Ret, result.ErrMsg)
+	}
+	return nil
 }
 
 func (p *Provider) Send(ctx context.Context, msg provider.OutboundMessage) (string, error) {

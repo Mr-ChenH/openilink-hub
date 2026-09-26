@@ -87,22 +87,22 @@ func (s *Server) handleBotAPISend(w http.ResponseWriter, r *http.Request) {
 			botAPIError(w, "bot not found", http.StatusNotFound)
 			return
 		}
-		if bot.Status == "session_expired" {
-			botAPIError(w, "bot session expired", http.StatusServiceUnavailable)
+		if bot.Status == "cooldown" || bot.Status == "session_expired" {
+			botAPIError(w, "bot is cooling down and will retry automatically", http.StatusServiceUnavailable)
 			return
 		}
 		botAPIError(w, "bot not connected", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Check if the bot can send (context_token freshness)
-	if canSend, reason := s.checkSendability(inst.BotID, botInst.Status()); !canSend {
+	// Check the token for this recipient, not merely any token owned by the bot.
+	if canSend, reason := s.checkSendability(inst.BotID, req.To, botInst.Status()); !canSend {
 		botAPIError(w, reason, http.StatusConflict)
 		return
 	}
 
 	// Auto-fill context_token from latest message if not available
-	contextToken := s.Store.GetLatestContextToken(inst.BotID)
+	contextToken := s.contextTokenForRecipient(inst.BotID, req.To)
 
 	// Build outbound message
 	outMsg := provider.OutboundMessage{

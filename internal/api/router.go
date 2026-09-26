@@ -4,10 +4,10 @@ import (
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/auth"
 	"github.com/openilink/openilink-hub/internal/bot"
 	"github.com/openilink/openilink-hub/internal/config"
-	"github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/push"
 	"github.com/openilink/openilink-hub/internal/registry"
 	"github.com/openilink/openilink-hub/internal/relay"
@@ -81,7 +81,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/webhook-plugins/{id}", s.handleGetPlugin)
 	mux.HandleFunc("GET /api/webhook-plugins/{id}/versions", s.handlePluginVersions)
 
-
 	// --- OAuth complete (popup callback page, no auth needed) ---
 	mux.HandleFunc("GET /oauth/complete", s.handleOAuthComplete)
 
@@ -96,6 +95,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/channels/config", s.handleChannelConfig)
 	mux.HandleFunc("GET /api/v1/channels/status", s.handleChannelStatus)
 	mux.HandleFunc("GET /api/v1/channels/media", s.handleChannelMedia)
+
+	// --- Apprise custom JSON notifications (HTTP Basic app_token auth) ---
+	mux.HandleFunc("POST /bot/v1/apprise", s.handleAppriseJSON)
 
 	// --- GitHub webhook (public, token-authenticated) ---
 	mux.HandleFunc("POST /api/hooks/github", s.handleGitHubWebhook)
@@ -266,8 +268,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/bot/", s.appTokenAuth(botAPI))
 
 	// WebSocket endpoints (auth via query param, outside appTokenAuth)
-	mux.HandleFunc("GET /bot/v1/ws", s.handleBotAPIWebSocket)          // per-installation
-	mux.HandleFunc("GET /bot/v1/app/ws", s.handleAppLevelWebSocket)    // per-app (all installations)
+	mux.HandleFunc("GET /bot/v1/ws", s.handleBotAPIWebSocket)       // per-installation
+	mux.HandleFunc("GET /bot/v1/app/ws", s.handleAppLevelWebSocket) // per-app (all installations)
 
 	// MCP endpoint (app_token auth, stateless streamable HTTP)
 	mux.Handle("/mcp", s.setupMCP())

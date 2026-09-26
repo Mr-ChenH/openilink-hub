@@ -113,17 +113,11 @@ func (s *Server) handleChannelSend(w http.ResponseWriter, r *http.Request) {
 	inst, ok := s.BotManager.GetInstance(ch.BotID)
 	if !ok {
 		bot, _ := s.Store.GetBot(ch.BotID)
-		if bot != nil && bot.Status == "session_expired" {
-			jsonError(w, "session expired", http.StatusConflict)
+		if bot != nil && (bot.Status == "cooldown" || bot.Status == "session_expired") {
+			jsonError(w, "bot is cooling down and will retry automatically", http.StatusConflict)
 		} else {
 			jsonError(w, "bot not connected", http.StatusServiceUnavailable)
 		}
-		return
-	}
-
-	// Check if the bot can send (context_token freshness)
-	if canSend, reason := s.checkSendability(ch.BotID, inst.Status()); !canSend {
-		jsonError(w, reason, http.StatusConflict)
 		return
 	}
 
@@ -133,9 +127,15 @@ func (s *Server) handleChannelSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-fill context_token from latest message if not provided
+	// Check the token for this recipient, not merely any token owned by the bot.
+	if canSend, reason := s.checkSendability(ch.BotID, msg.Recipient, inst.Status()); !canSend {
+		jsonError(w, reason, http.StatusConflict)
+		return
+	}
+
+	// Auto-fill context_token from this recipient's latest message.
 	if msg.ContextToken == "" {
-		msg.ContextToken = s.Store.GetLatestContextToken(ch.BotID)
+		msg.ContextToken = s.contextTokenForRecipient(ch.BotID, msg.Recipient)
 	}
 
 	clientID, err := inst.Send(context.Background(), msg)

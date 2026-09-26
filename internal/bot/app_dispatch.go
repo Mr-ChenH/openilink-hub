@@ -263,7 +263,7 @@ func (m *Manager) sendAppResult(inst *Instance, installation *store.AppInstallat
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	contextToken := m.store.GetLatestContextToken(inst.DBID)
+	contextToken := m.store.GetLatestContextTokenForRecipient(inst.DBID, to)
 
 	switch result.ReplyType {
 	case "image", "video", "file", "voice":
@@ -542,4 +542,3 @@ func resolveItemMedia(item *relay.MessageItem, baseURL, botDBID string) {
 	m.AESKey = ""
 	item.Media = &m
 }
-

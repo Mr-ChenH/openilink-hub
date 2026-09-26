@@ -246,11 +246,19 @@ export function BotDetailPage() {
                   </Button>
                 </div>
               )}
-              <Badge variant={bot.status === "connected" ? "default" : "destructive"}>
+              <Badge
+                variant={
+                  bot.status === "connected"
+                    ? "default"
+                    : bot.status === "cooldown" || bot.status === "session_expired"
+                      ? "secondary"
+                      : "destructive"
+                }
+              >
                 {bot.status === "connected"
                   ? "运行中"
-                  : bot.status === "session_expired"
-                    ? "授权过期"
+                  : bot.status === "cooldown" || bot.status === "session_expired"
+                    ? "冷却中"
                     : "离线"}
               </Badge>
               {bot.can_send === false ? (

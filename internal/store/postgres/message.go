@@ -129,11 +129,35 @@ func (db *DB) GetLatestContextToken(botID string) string {
 	return token
 }
 
+func (db *DB) GetLatestContextTokenForRecipient(botID, recipient string) string {
+	if recipient == "" {
+		return db.GetLatestContextToken(botID)
+	}
+	var token string
+	db.QueryRow(
+		"SELECT context_token FROM messages WHERE bot_id = $1 AND from_user_id = $2 AND context_token != '' ORDER BY id DESC LIMIT 1",
+		botID, recipient,
+	).Scan(&token)
+	return token
+}
+
 func (db *DB) HasFreshContextToken(botID string, maxAge time.Duration) bool {
 	var exists bool
 	db.QueryRow(
 		"SELECT EXISTS(SELECT 1 FROM messages WHERE bot_id = $1 AND context_token != '' AND created_at > $2::timestamptz - ($3 * INTERVAL '1 second'))",
 		botID, db.now(), int(maxAge.Seconds()),
+	).Scan(&exists)
+	return exists
+}
+
+func (db *DB) HasFreshContextTokenForRecipient(botID, recipient string, maxAge time.Duration) bool {
+	if recipient == "" {
+		return db.HasFreshContextToken(botID, maxAge)
+	}
+	var exists bool
+	db.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM messages WHERE bot_id = $1 AND from_user_id = $2 AND context_token != '' AND created_at > $3::timestamptz - ($4 * INTERVAL '1 second'))",
+		botID, recipient, db.now(), int(maxAge.Seconds()),
 	).Scan(&exists)
 	return exists
 }

@@ -39,12 +39,13 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 
 const statusConfig: Record<
   string,
-  { label: string; variant: "default" | "destructive" | "outline"; dot: string }
+  { label: string; variant: "default" | "destructive" | "outline" | "secondary"; dot: string }
 > = {
   connected: { label: "运行中", variant: "default", dot: "bg-green-500" },
   disconnected: { label: "离线", variant: "outline", dot: "bg-muted-foreground" },
   error: { label: "故障", variant: "destructive", dot: "bg-destructive" },
-  session_expired: { label: "授权过期", variant: "destructive", dot: "bg-destructive" },
+  cooldown: { label: "冷却中", variant: "secondary", dot: "bg-amber-500" },
+  session_expired: { label: "冷却中", variant: "secondary", dot: "bg-amber-500" },
 };
 
 export function BotsPage() {
@@ -288,7 +289,7 @@ function BotInstanceCard({ bot, onRebind }: { bot: any; onRebind: () => void }) 
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-40">
-              {bot.status !== "session_expired" ? (
+              {bot.status !== "session_expired" && bot.status !== "cooldown" ? (
                 <DropdownMenuItem onClick={() => handleAction("reconnect")} className="gap-2">
                   <RefreshCw className="h-3.5 w-3.5" /> 重新连接
                 </DropdownMenuItem>
@@ -320,14 +321,14 @@ function BotInstanceCard({ bot, onRebind }: { bot: any; onRebind: () => void }) 
           ) : null}
         </div>
 
-        {/* Session expired warning */}
-        {bot.status === "session_expired" ? (
+        {/* Weixin stale-token cooldown warning */}
+        {bot.status === "session_expired" || bot.status === "cooldown" ? (
           <div className="rounded-lg bg-destructive/5 border border-destructive/10 p-3">
             <div className="flex items-start gap-2">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 text-destructive shrink-0" />
               <div className="space-y-1">
                 <p className="text-xs text-destructive leading-snug">
-                  会话已过期，请在微信中给该账号发一条消息以恢复连接。
+                  微信侧会话正在冷却，Bot 会在约一小时后自动重试。也可重新扫码立即换取授权。
                 </p>
                 <Button
                   variant="link"
