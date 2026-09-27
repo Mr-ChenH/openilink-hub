@@ -596,9 +596,6 @@ func (db *DB) CreateAgentOutboxItem(i *store.AgentOutboxItem) (*store.AgentOutbo
 	if err != nil {
 		return nil, false, err
 	}
-	if n == 0 && (got.Recipient != i.Recipient || got.ContentRef != i.ContentRef || !bytes.Equal(got.Content, i.Content)) {
-		return nil, false, fmt.Errorf("agent outbox idempotency conflict")
-	}
 	return got, n == 1, nil
 }
 func (db *DB) GetAgentOutboxItem(id string) (*store.AgentOutboxItem, error) {

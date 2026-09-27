@@ -50,6 +50,8 @@ type DefinitelyUnsentError interface {
 
 type KnownUnsentError struct{ Err error }
 
+var errMalformedTerminalResult = errors.New("malformed terminal runtime result")
+
 func (e *KnownUnsentError) Error() string          { return e.Err.Error() }
 func (e *KnownUnsentError) Unwrap() error          { return e.Err }
 func (e *KnownUnsentError) DefinitelyUnsent() bool { return true }
@@ -374,7 +376,11 @@ func (c *Coordinator) reconcileState(runID string, fence int64, state RunState) 
 	case RunCompleted:
 		payload, _ := json.Marshal(map[string]string{"text": state.Text})
 		if completeErr := c.complete(run, fence, payload); completeErr != nil {
-			_, _ = c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunFailed, "invalid_runtime_result", completeErr.Error())
+			if !errors.Is(completeErr, errMalformedTerminalResult) {
+				return false
+			}
+			changed, transitionErr := c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunFailed, "invalid_runtime_result", completeErr.Error())
+			return transitionErr == nil && changed
 		}
 		return true
 	case RunFailed:
@@ -393,13 +399,13 @@ func (c *Coordinator) reconcileState(runID string, fence int64, state RunState) 
 
 func (c *Coordinator) complete(run *store.AgentRun, fence int64, payload json.RawMessage) error {
 	if len(payload) > maxRuntimeEventBytes {
-		return fmt.Errorf("agent: completed run payload exceeds limit")
+		return fmt.Errorf("%w: payload exceeds limit", errMalformedTerminalResult)
 	}
 	var data struct {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil || strings.TrimSpace(data.Text) == "" {
-		return fmt.Errorf("agent: completed run has no text")
+		return fmt.Errorf("%w: completed run has no text", errMalformedTerminalResult)
 	}
 	item, err := c.enqueueReply(run, "final", data.Text)
 	if err != nil {

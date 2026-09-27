@@ -206,9 +206,13 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	if err != nil || !inserted || gotItem.Status != store.AgentOutboxPending {
 		t.Fatalf("create outbox: got=%+v inserted=%v err=%v", gotItem, inserted, err)
 	}
-	_, inserted, err = s.CreateAgentOutboxItem(item)
-	if err != nil || inserted {
-		t.Fatalf("outbox replay: inserted=%v err=%v", inserted, err)
+	replayItem := &store.AgentOutboxItem{
+		ID: "outbox-retry", RunID: run.ID, Kind: "final", Recipient: "changed-recipient",
+		Content: json.RawMessage(`{"text":"changed"}`), ContentRef: "agent-outbox:outbox-retry",
+	}
+	gotItem, inserted, err = s.CreateAgentOutboxItem(replayItem)
+	if err != nil || inserted || gotItem.ID != item.ID || gotItem.Recipient != item.Recipient || string(gotItem.Content) != string(item.Content) {
+		t.Fatalf("outbox replay: got=%+v inserted=%v err=%v", gotItem, inserted, err)
 	}
 	pending, err := s.ListPendingAgentOutbox(10)
 	if err != nil || len(pending) != 1 {
@@ -219,6 +223,17 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	}
 	if ok, err := s.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxSent, "provider-1", ""); err != nil || !ok {
 		t.Fatalf("send outbox: ok=%v err=%v", ok, err)
+	}
+
+	failure := &store.AgentOutboxItem{ID: "outbox-failure-1", RunID: run.ID, Kind: "failure", Recipient: conv.SenderID, Content: json.RawMessage(`{"text":"failed"}`), ContentRef: "agent-outbox:outbox-failure-1"}
+	gotFailure, inserted, err := s.CreateAgentOutboxItem(failure)
+	if err != nil || !inserted {
+		t.Fatalf("create failure outbox: got=%+v inserted=%v err=%v", gotFailure, inserted, err)
+	}
+	failureReplay := &store.AgentOutboxItem{ID: "outbox-failure-2", RunID: run.ID, Kind: "failure", Recipient: "changed", Content: json.RawMessage(`{"text":"changed"}`), ContentRef: "agent-outbox:outbox-failure-2"}
+	gotFailure, inserted, err = s.CreateAgentOutboxItem(failureReplay)
+	if err != nil || inserted || gotFailure.ID != failure.ID || string(gotFailure.Content) != string(failure.Content) {
+		t.Fatalf("failure outbox replay: got=%+v inserted=%v err=%v", gotFailure, inserted, err)
 	}
 
 	if ok, err := s.TransitionAgentRun(run.ID, store.AgentRunRunning, store.AgentRunCompleted, "", ""); err != nil || !ok {

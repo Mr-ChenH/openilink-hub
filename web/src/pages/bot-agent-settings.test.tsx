@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BotAgentSettings } from "./bot-agent-settings";
+import { BotAgentSettings, withDefaultToolPolicy } from "./bot-agent-settings";
 
 const updateMutate = vi.fn();
 const unavailableSettings = {
@@ -67,8 +67,15 @@ describe("BotAgentSettings", () => {
     expect(container.textContent).toContain("Pi 运行时未配置或当前不可用");
     expect(container.textContent).toContain("没有可供 Agent 使用的工具");
     expect(container.textContent).toContain("尚无 Agent 运行记录");
+    expect(container.textContent).toContain("按工具影响级别");
     const enable = container.querySelector("#agent-enabled-bot-1");
     expect(enable?.getAttribute("data-disabled")).not.toBeNull();
     expect(updateMutate).not.toHaveBeenCalled();
+  });
+
+  it("preserves an undefined default when using per-effect policy", () => {
+    expect(
+      withDefaultToolPolicy({ default: "confirm", tools: { lookup: "allow" } }, "effect-default"),
+    ).toEqual({ tools: { lookup: "allow" } });
   });
 });

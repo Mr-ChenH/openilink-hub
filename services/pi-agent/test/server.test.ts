@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
 import type { ServiceConfig } from "../src/config.js";
 import { createApp } from "../src/server.js";
+import { RunStore } from "../src/run-store.js";
 import type { AgentRuntime, CreateRunRequest, RuntimeCallbacks, RuntimeHandle } from "../src/types.js";
 
 class MockRuntime implements AgentRuntime {
@@ -225,6 +226,33 @@ test("restart persists identity and exposes in-flight work as interrupted withou
   // leaves no scheduler work behind after the test.
   first.runtime.finish("restart-run", "ignored");
   await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
+test("terminal persistence scrubs secrets atomically and repairs legacy terminal rows", () => {
+  const sessionDir = mkdtempSync(join(tmpdir(), "pi-agent-persist-"));
+  temporaryDirectories.push(sessionDir);
+  const filePath = join(sessionDir, "runs.json");
+  const request = run("persisted-terminal", "conversation-a", "sensitive input");
+  request.input.message_id = "sensitive-message-id";
+  request.tool_capability = "sensitive-capability";
+  request.tools = [{ name: "secret_tool", description: "sensitive tool catalog", parameters: {} }];
+
+  const store = new RunStore(100, filePath);
+  const { run: record } = store.create(request);
+  store.finish(record, "completed", "run.completed", { text: "done" }, { result: { text: "done" } });
+  const persisted = readFileSync(filePath, "utf8");
+  assert.doesNotMatch(persisted, /sensitive input|sensitive-message-id|sensitive-capability|secret_tool|sensitive tool catalog/);
+
+  const legacy = JSON.parse(persisted) as Array<Record<string, unknown>>;
+  const legacyRequest = legacy[0]?.request as CreateRunRequest;
+  legacyRequest.input = { message_id: "legacy-message", text: "legacy-input" };
+  legacyRequest.tool_capability = "legacy-capability";
+  legacyRequest.tools = [{ name: "legacy_tool", description: "legacy catalog", parameters: {} }];
+  writeFileSync(filePath, JSON.stringify(legacy), "utf8");
+
+  new RunStore(100, filePath);
+  const repaired = readFileSync(filePath, "utf8");
+  assert.doesNotMatch(repaired, /legacy-message|legacy-input|legacy-capability|legacy_tool|legacy catalog/);
 });
 
 test("validation requires capability for dynamic tools and preserves raw slash text", async () => {

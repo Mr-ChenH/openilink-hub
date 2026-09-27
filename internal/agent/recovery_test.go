@@ -166,6 +166,107 @@ func TestOutboxBlocksAmbiguousDelivery(t *testing.T) {
 	}
 }
 
+type failOnceOutboxStore struct {
+	store.Store
+	fail bool
+}
+
+func (s *failOnceOutboxStore) CreateAgentOutboxItem(item *store.AgentOutboxItem) (*store.AgentOutboxItem, bool, error) {
+	if s.fail {
+		s.fail = false
+		return nil, false, errors.New("temporary outbox persistence failure")
+	}
+	return s.Store.CreateAgentOutboxItem(item)
+}
+
+func TestRecoveredCompletionRetriesAfterOutboxPersistenceFailure(t *testing.T) {
+	s, completed := completedRun(t)
+	run, _, err := s.CreateAgentRun(&store.AgentRun{
+		ID: "run-persistence-retry", ConversationID: completed.ConversationID, BotID: completed.BotID,
+		InboundMessageID: "message-persistence-retry", RunKind: "message", Runtime: "pi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, acquired, err := s.AcquireAgentRunLease(run.ID, "owner", time.Now().Unix(), time.Now().Add(time.Minute).Unix())
+	if err != nil || !acquired {
+		t.Fatalf("acquire lease: fence=%d acquired=%v err=%v", fence, acquired, err)
+	}
+	wrapped := &failOnceOutboxStore{Store: s, fail: true}
+	coordinator := &Coordinator{Store: wrapped}
+	state := RunState{RunHandle: RunHandle{RunID: run.ID, Status: RunCompleted}, Text: "recovered"}
+	if coordinator.reconcileState(run.ID, fence, state) {
+		t.Fatal("transient persistence error was treated as terminal")
+	}
+	got, _ := s.GetAgentRun(run.ID)
+	if got.Status != store.AgentRunQueued {
+		t.Fatalf("run status after transient error = %s", got.Status)
+	}
+	if !coordinator.reconcileState(run.ID, fence, state) {
+		t.Fatal("recovered completion did not settle on retry")
+	}
+	got, _ = s.GetAgentRun(run.ID)
+	if got.Status != store.AgentRunCompleted {
+		t.Fatalf("run status after retry = %s", got.Status)
+	}
+}
+
+func TestRecoveredCompletionReusesOutboxAcrossCrashWindow(t *testing.T) {
+	s, completed := completedRun(t)
+	run, _, err := s.CreateAgentRun(&store.AgentRun{
+		ID: "run-crash-window", ConversationID: completed.ConversationID, BotID: completed.BotID,
+		InboundMessageID: "message-crash-window", RunKind: "message", Runtime: "pi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, acquired, err := s.AcquireAgentRunLease(run.ID, "owner", time.Now().Unix(), time.Now().Add(time.Minute).Unix())
+	if err != nil || !acquired {
+		t.Fatalf("acquire lease: fence=%d acquired=%v err=%v", fence, acquired, err)
+	}
+	coordinator := &Coordinator{Store: s}
+	first, err := coordinator.enqueueReply(run, "final", "persisted before crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := RunState{RunHandle: RunHandle{RunID: run.ID, Status: RunCompleted}, Text: "recomputed after restart"}
+	if !coordinator.reconcileState(run.ID, fence, state) {
+		t.Fatal("crash-window reconciliation did not settle")
+	}
+	got, _ := s.GetAgentRun(run.ID)
+	if got.Status != store.AgentRunCompleted {
+		t.Fatalf("run status = %s", got.Status)
+	}
+	pending, err := s.ListPendingAgentOutbox(10)
+	if err != nil || len(pending) != 1 || pending[0].ID != first.ID || string(pending[0].Content) != string(first.Content) {
+		t.Fatalf("outbox after recovery=%+v err=%v", pending, err)
+	}
+}
+
+func TestMalformedRecoveredCompletionFailsRun(t *testing.T) {
+	s, completed := completedRun(t)
+	run, _, err := s.CreateAgentRun(&store.AgentRun{
+		ID: "run-malformed-result", ConversationID: completed.ConversationID, BotID: completed.BotID,
+		InboundMessageID: "message-malformed-result", RunKind: "message", Runtime: "pi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, acquired, err := s.AcquireAgentRunLease(run.ID, "owner", time.Now().Unix(), time.Now().Add(time.Minute).Unix())
+	if err != nil || !acquired {
+		t.Fatalf("acquire lease: fence=%d acquired=%v err=%v", fence, acquired, err)
+	}
+	coordinator := &Coordinator{Store: s}
+	state := RunState{RunHandle: RunHandle{RunID: run.ID, Status: RunCompleted}}
+	if !coordinator.reconcileState(run.ID, fence, state) {
+		t.Fatal("malformed result did not settle")
+	}
+	got, _ := s.GetAgentRun(run.ID)
+	if got.Status != store.AgentRunFailed || got.ErrorCode != "invalid_runtime_result" {
+		t.Fatalf("run=%+v", got)
+	}
+}
+
 func TestDuplicateTerminalRecoveryCreatesOneReply(t *testing.T) {
 	s, completed := completedRun(t)
 	run, _, err := s.CreateAgentRun(&store.AgentRun{

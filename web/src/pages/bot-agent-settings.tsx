@@ -46,6 +46,19 @@ const effectLabel: Record<string, string> = {
   unknown: "未知",
 };
 const policyLabel: Record<string, string> = { allow: "允许", confirm: "需确认", deny: "禁止" };
+const effectDefaultPolicy = "effect-default";
+
+type DefaultToolPolicy = "allow" | "confirm" | "deny" | typeof effectDefaultPolicy;
+
+export function withDefaultToolPolicy(
+  current: BotAgentSettings["tool_policy"],
+  value: DefaultToolPolicy,
+): BotAgentSettings["tool_policy"] {
+  const next = { ...current };
+  if (value === effectDefaultPolicy) delete next.default;
+  else next.default = value;
+  return next;
+}
 const sourceLabel: Record<string, string> = { app: "应用", installation: "安装配置" };
 const activeStatuses = new Set(["queued", "running", "waiting_tool", "waiting_confirmation"]);
 
@@ -234,16 +247,17 @@ export function BotAgentSettings({ botId }: { botId: string }) {
             />
           </div>
           <Select
-            value={settings.tool_policy?.default || "confirm"}
+            value={settings.tool_policy?.default ?? effectDefaultPolicy}
             disabled={!settings.profile_id}
-            onValueChange={(value: "allow" | "confirm" | "deny") =>
-              updatePolicy({ tool_policy: { ...settings.tool_policy, default: value } })
+            onValueChange={(value: DefaultToolPolicy) =>
+              updatePolicy({ tool_policy: withDefaultToolPolicy(settings.tool_policy, value) })
             }
           >
-            <SelectTrigger>
+            <SelectTrigger aria-label="默认工具策略">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={effectDefaultPolicy}>按工具影响级别</SelectItem>
               <SelectItem value="allow">默认允许</SelectItem>
               <SelectItem value="confirm">默认需确认</SelectItem>
               <SelectItem value="deny">默认禁止</SelectItem>

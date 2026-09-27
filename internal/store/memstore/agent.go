@@ -585,11 +585,7 @@ func (s *Store) CreateAgentOutboxItem(v *store.AgentOutboxItem) (*store.AgentOut
 	}
 	key := outboxKey(v)
 	if id, ok := s.outboxIndex[key]; ok {
-		got := s.agentOutbox[id]
-		if got.Recipient != v.Recipient || got.ContentRef != v.ContentRef || !bytes.Equal(got.Content, v.Content) {
-			return nil, false, fmt.Errorf("agent outbox idempotency conflict")
-		}
-		return outboxCopy(got), false, nil
+		return outboxCopy(s.agentOutbox[id]), false, nil
 	}
 	if v.ID == "" {
 		v.ID = uuid.NewString()

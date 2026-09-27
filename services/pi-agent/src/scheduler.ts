@@ -42,11 +42,8 @@ export class RunScheduler {
   }
 
   #finishCancelled(run: RunRecord): void {
-    if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") return;
-    run.status = "cancelled";
-    run.finishedAt = new Date().toISOString();
-    this.store.append(run, "run.cancelled");
-    this.store.scrubTerminal(run);
+    if (run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "interrupted") return;
+    this.store.finish(run, "cancelled", "run.cancelled");
   }
 
   #pump(): void {
@@ -86,20 +83,13 @@ export class RunScheduler {
       });
       const text = boundedFinalText(await Promise.race([handle.result, timeout]));
       if (run.status === "running") {
-        run.status = "completed";
-        run.result = { text };
-        run.finishedAt = new Date().toISOString();
-        this.store.append(run, "run.completed", { text });
-        this.store.scrubTerminal(run);
+        this.store.finish(run, "completed", "run.completed", { text }, { result: { text } });
       }
     } catch (error) {
       if (run.status === "running") {
-        run.status = "failed";
-        run.finishedAt = new Date().toISOString();
         const timeout = error instanceof TimeoutError;
-        run.error = { code: timeout ? "timeout" : "runtime_error", message: timeout ? "run timed out" : "agent runtime failed" };
-        this.store.append(run, "run.failed", run.error);
-        this.store.scrubTerminal(run);
+        const runError = { code: timeout ? "timeout" : "runtime_error", message: timeout ? "run timed out" : "agent runtime failed" };
+        this.store.finish(run, "failed", "run.failed", runError, { error: runError });
       }
     } finally {
       if (timer) clearTimeout(timer);

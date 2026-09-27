@@ -36,22 +36,23 @@ export class RunStore {
     }
     let changed = false;
     for (const run of this.#runs.values()) {
-      if (run.status !== "queued" && run.status !== "running") continue;
-      run.status = "interrupted";
-      run.finishedAt = new Date().toISOString();
-      run.error = { code: "sidecar_restarted", message: "agent sidecar restarted during execution" };
-      const data = sanitizeEventData("run.interrupted", run.error) ?? {};
-      const event: RunEvent = {
-        seq: (run.events.at(-1)?.seq ?? 0) + 1,
-        run_id: run.id,
-        type: "run.interrupted",
-        timestamp: run.finishedAt,
-        data,
-      };
-      run.events.push(event);
-      if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
-      this.#scrubTerminal(run);
-      changed = true;
+      if (run.status === "queued" || run.status === "running") {
+        run.status = "interrupted";
+        run.finishedAt = new Date().toISOString();
+        run.error = { code: "sidecar_restarted", message: "agent sidecar restarted during execution" };
+        const data = sanitizeEventData("run.interrupted", run.error) ?? {};
+        const event: RunEvent = {
+          seq: (run.events.at(-1)?.seq ?? 0) + 1,
+          run_id: run.id,
+          type: "run.interrupted",
+          timestamp: run.finishedAt,
+          data,
+        };
+        run.events.push(event);
+        if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
+        changed = true;
+      }
+      changed = this.#scrubTerminal(run) || changed;
     }
     if (changed) this.#persist();
   }
@@ -97,17 +98,47 @@ export class RunStore {
     return event;
   }
 
-  scrubTerminal(run: RunRecord): void {
-    if (!this.#scrubTerminal(run)) return;
+  finish(
+    run: RunRecord,
+    status: "completed" | "failed" | "cancelled",
+    type: "run.completed" | "run.failed" | "run.cancelled",
+    data: Record<string, unknown> = {},
+    outcome: Pick<RunRecord, "result" | "error"> = {},
+  ): RunEvent | undefined {
+    const sanitized = sanitizeEventData(type, data);
+    if (!sanitized) return undefined;
+    run.status = status;
+    run.finishedAt = new Date().toISOString();
+    if (outcome.result) run.result = outcome.result;
+    else delete run.result;
+    if (outcome.error) run.error = outcome.error;
+    else delete run.error;
+    this.#scrubTerminal(run);
+    const event: RunEvent = {
+      seq: (run.events.at(-1)?.seq ?? 0) + 1,
+      run_id: run.id,
+      type,
+      timestamp: run.finishedAt,
+      data: sanitized,
+    };
+    run.events.push(event);
+    if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
     this.#persist();
+    for (const listener of this.#listeners.get(run.id) ?? []) listener(event);
+    return event;
   }
 
   #scrubTerminal(run: RunRecord): boolean {
     if (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled" && run.status !== "interrupted") return false;
+    const alreadyScrubbed = run.request.tool_capability === undefined
+      && run.request.input.message_id === ""
+      && run.request.input.text === ""
+      && run.request.tools.length === 0;
+    if (alreadyScrubbed) return false;
     const { tool_capability: _discardedCapability, ...retained } = run.request;
     run.request = {
       ...retained,
-      input: { ...retained.input, text: "" },
+      input: { message_id: "", text: "" },
       tools: [],
     };
     return true;
