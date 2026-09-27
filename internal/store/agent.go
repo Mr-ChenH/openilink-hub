@@ -183,21 +183,25 @@ type AgentOutboxItem struct {
 type AgentStore interface {
 	CreateAgentProfile(profile *AgentProfile) error
 	GetAgentProfile(id string) (*AgentProfile, error)
+	ListAgentProfilesByOwner(ownerID string) ([]AgentProfile, error)
 	UpdateAgentProfile(profile *AgentProfile) error
 	PutBotAgentSettings(settings *BotAgentSettings) error
 	GetBotAgentSettings(botID string) (*BotAgentSettings, error)
 
 	GetOrCreateAgentConversation(conversation *AgentConversation) (*AgentConversation, bool, error)
 	GetAgentConversation(id string) (*AgentConversation, error)
+	ListAgentConversationsByBot(botID string, limit int) ([]AgentConversation, error)
 	ResetAgentConversation(id, sessionRef string) (*AgentConversation, error)
 
 	CreateAgentRun(run *AgentRun) (*AgentRun, bool, error)
 	GetAgentRun(id string) (*AgentRun, error)
+	ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID string, limit int) ([]AgentRun, error)
 	TransitionAgentRun(id, fromStatus, toStatus, errorCode, errorMessage string) (bool, error)
 	AcquireAgentRunLease(id, owner string, now, leaseUntil int64) (fence int64, acquired bool, err error)
 
 	CreateAgentToolCall(call *AgentToolCall) (*AgentToolCall, bool, error)
 	GetAgentToolCall(runID, callID string) (*AgentToolCall, error)
+	ListAgentToolCalls(runID string) ([]AgentToolCall, error)
 	TransitionAgentToolCall(runID, callID, fromStatus, toStatus string, result json.RawMessage, resultRef, errorCode, errorMessage string) (bool, error)
 
 	CreateAgentConfirmation(confirmation *AgentConfirmation) error

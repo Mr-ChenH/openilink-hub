@@ -82,6 +82,10 @@ vi.mock("@/components/ui/confirm-dialog", () => ({
   }),
 }));
 
+vi.mock("./bot-agent-settings", () => ({
+  BotAgentSettings: () => <section>Bot Agent</section>,
+}));
+
 vi.mock("@/components/ui/tooltip", () => ({
   Tooltip: ({ children }: any) => <>{children}</>,
   TooltipTrigger: ({ children }: any) => <>{children}</>,

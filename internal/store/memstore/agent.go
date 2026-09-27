@@ -64,6 +64,23 @@ func (s *Store) GetAgentProfile(id string) (*store.AgentProfile, error) {
 	}
 	return profileCopy(p), nil
 }
+func (s *Store) ListAgentProfilesByOwner(ownerID string) ([]store.AgentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []store.AgentProfile
+	for _, p := range s.agentProfiles {
+		if p.OwnerID == ownerID {
+			out = append(out, *profileCopy(p))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
+	return out, nil
+}
 func (s *Store) UpdateAgentProfile(p *store.AgentProfile) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,6 +148,29 @@ func (s *Store) GetAgentConversation(id string) (*store.AgentConversation, error
 	}
 	return conversationCopy(v), nil
 }
+func (s *Store) ListAgentConversationsByBot(botID string, limit int) ([]store.AgentConversation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var out []store.AgentConversation
+	for _, v := range s.agentConversations {
+		if v.BotID == botID {
+			out = append(out, *conversationCopy(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt == out[j].UpdatedAt {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].UpdatedAt > out[j].UpdatedAt
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
 func (s *Store) ResetAgentConversation(id, ref string) (*store.AgentConversation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,6 +226,30 @@ func (s *Store) GetAgentRun(id string) (*store.AgentRun, error) {
 		return nil, sql.ErrNoRows
 	}
 	return runCopy(v), nil
+}
+func (s *Store) ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID string, limit int) ([]store.AgentRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	var out []store.AgentRun
+	for _, v := range s.agentRuns {
+		before := beforeCreatedAt == 0 || v.CreatedAt < beforeCreatedAt || (v.CreatedAt == beforeCreatedAt && v.ID < beforeID)
+		if v.BotID == botID && before {
+			out = append(out, *runCopy(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt > out[j].CreatedAt
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 func (s *Store) TransitionAgentRun(id, from, to, code, message string) (bool, error) {
 	if !store.ValidAgentRunTransition(from, to) {
@@ -266,6 +330,23 @@ func (s *Store) GetAgentToolCall(run, id string) (*store.AgentToolCall, error) {
 		return nil, sql.ErrNoRows
 	}
 	return callCopy(v), nil
+}
+func (s *Store) ListAgentToolCalls(runID string) ([]store.AgentToolCall, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []store.AgentToolCall
+	for _, v := range s.agentToolCalls {
+		if v.RunID == runID {
+			out = append(out, *callCopy(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
+	return out, nil
 }
 func (s *Store) TransitionAgentToolCall(run, id, from, to string, result json.RawMessage, resultRef, code, message string) (bool, error) {
 	if !store.ValidAgentToolTransition(from, to) {

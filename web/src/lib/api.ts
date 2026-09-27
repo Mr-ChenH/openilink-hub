@@ -45,6 +45,83 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 
+export interface AgentProfile {
+  id: string;
+  owner_id: string;
+  runtime: "pi";
+  model_profile: string;
+  prompt_version: string;
+  limits: Record<string, unknown>;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface BotAgentSettings {
+  bot_id: string;
+  profile_id: string;
+  routing_mode: "off" | "agent";
+  trigger_policy: { private?: boolean; groups?: boolean };
+  tool_policy: { default?: "allow" | "confirm" | "deny" };
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface AgentRun {
+  id: string;
+  conversation_id: string;
+  bot_id: string;
+  run_kind: string;
+  status: string;
+  runtime: string;
+  error_code?: string;
+  error_message?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentConversation {
+  id: string;
+  bot_id: string;
+  provider: string;
+  epoch: number;
+  last_completed_run_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentRunDetail {
+  run: AgentRun;
+  conversation: AgentConversation;
+  events: Array<{
+    run_id: string;
+    seq: number;
+    event_type: string;
+    sanitized_payload: Record<string, unknown>;
+    created_at: number;
+  }>;
+  tool_calls: Array<{
+    id: string;
+    tool_name: string;
+    effect: string;
+    status: string;
+    error_code?: string;
+    error_message?: string;
+    created_at: number;
+  }>;
+}
+
+export interface EffectiveAgentTool {
+  name: string;
+  original_name: string;
+  description: string;
+  execution: { effect: string; idempotent: boolean };
+  policy: "allow" | "confirm" | "deny";
+  source: "app" | "installation";
+  app_id: string;
+  installation_id: string;
+}
+
 export const api = {
   // Auth
   register: (username: string, password: string) =>
@@ -121,6 +198,58 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
   botContacts: (id: string) => request<any[]>(`/api/bots/${id}/contacts`),
+
+  // Agent control plane
+  listAgentProfiles: () => request<AgentProfile[]>("/api/agent/profiles"),
+  createAgentProfile: (data: {
+    model_profile: string;
+    prompt_version?: string;
+    enabled: boolean;
+  }) =>
+    request<AgentProfile>("/api/agent/profiles", { method: "POST", body: JSON.stringify(data) }),
+  updateAgentProfile: (id: string, data: Partial<AgentProfile>) =>
+    request<AgentProfile>(`/api/agent/profiles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  getAgentSettings: (botId: string) =>
+    request<{ settings: BotAgentSettings; runtime_available: boolean }>(
+      `/api/bots/${botId}/agent/settings`,
+    ),
+  updateAgentSettings: (
+    botId: string,
+    settings: Pick<
+      BotAgentSettings,
+      "profile_id" | "routing_mode" | "trigger_policy" | "tool_policy"
+    >,
+  ) =>
+    request<BotAgentSettings>(`/api/bots/${botId}/agent/settings`, {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+  getAgentTools: (botId: string) =>
+    request<{ bot_id: string; catalog_version: string; tools: EffectiveAgentTool[] }>(
+      `/api/bots/${botId}/agent/tools`,
+    ),
+  listAgentRuns: (botId: string, limit = 10, cursor?: string) =>
+    request<{ runs: AgentRun[]; next_cursor: string }>(
+      `/api/bots/${botId}/agent/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    ),
+  getAgentRun: (botId: string, runId: string) =>
+    request<AgentRunDetail>(`/api/bots/${botId}/agent/runs/${runId}`),
+  cancelAgentRun: (botId: string, runId: string) =>
+    request<{ ok: boolean }>(`/api/bots/${botId}/agent/runs/${runId}/cancel`, { method: "POST" }),
+  listAgentConversations: (botId: string) =>
+    request<AgentConversation[]>(`/api/bots/${botId}/agent/conversations`),
+  resetAgentConversation: (botId: string, conversationId: string) =>
+    request<AgentConversation>(`/api/bots/${botId}/agent/conversations/${conversationId}/reset`, {
+      method: "POST",
+    }),
+  confirmAgentTool: (botId: string, runId: string, confirmationId: string, code: string) =>
+    request<{ ok: boolean }>(
+      `/api/bots/${botId}/agent/runs/${runId}/confirmations/${confirmationId}`,
+      { method: "POST", body: JSON.stringify({ code }) },
+    ),
 
   // Channels (under bots)
   listChannels: (botId: string) => request<any[]>(`/api/bots/${botId}/channels`),

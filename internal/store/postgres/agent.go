@@ -66,6 +66,22 @@ func scanAgentProfile(row interface{ Scan(...any) error }) (*store.AgentProfile,
 func (db *DB) GetAgentProfile(id string) (*store.AgentProfile, error) {
 	return scanAgentProfile(db.agentQueryRow(`SELECT id,owner_id,runtime,model_profile,prompt_version,limits,enabled,created_at,updated_at FROM agent_profiles WHERE id=?`, id))
 }
+func (db *DB) ListAgentProfilesByOwner(ownerID string) ([]store.AgentProfile, error) {
+	rows, err := db.agentQuery(`SELECT id,owner_id,runtime,model_profile,prompt_version,limits,enabled,created_at,updated_at FROM agent_profiles WHERE owner_id=? ORDER BY created_at,id`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AgentProfile
+	for rows.Next() {
+		p, err := scanAgentProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
 func (db *DB) UpdateAgentProfile(p *store.AgentProfile) error {
 	r, err := db.agentExec(`UPDATE agent_profiles SET owner_id=?,runtime=?,model_profile=?,prompt_version=?,limits=?,enabled=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=?`, p.OwnerID, p.Runtime, p.ModelProfile, p.PromptVersion, jsonText(p.Limits), p.Enabled, p.ID)
 	if err != nil {
@@ -124,6 +140,25 @@ func (db *DB) GetOrCreateAgentConversation(c *store.AgentConversation) (*store.A
 func (db *DB) GetAgentConversation(id string) (*store.AgentConversation, error) {
 	return scanConversation(db.agentQueryRow(`SELECT `+conversationCols+` FROM agent_conversations WHERE id=?`, id))
 }
+func (db *DB) ListAgentConversationsByBot(botID string, limit int) ([]store.AgentConversation, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := db.agentQuery(`SELECT `+conversationCols+` FROM agent_conversations WHERE bot_id=? ORDER BY updated_at DESC,id DESC LIMIT ?`, botID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AgentConversation
+	for rows.Next() {
+		c, err := scanConversation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
 func (db *DB) ResetAgentConversation(id, sessionRef string) (*store.AgentConversation, error) {
 	r, err := db.agentExec(`UPDATE agent_conversations SET session_ref=?,epoch=epoch+1,last_completed_run_id='',updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=?`, sessionRef, id)
 	if err != nil {
@@ -169,6 +204,33 @@ func (db *DB) CreateAgentRun(r *store.AgentRun) (*store.AgentRun, bool, error) {
 }
 func (db *DB) GetAgentRun(id string) (*store.AgentRun, error) {
 	return scanRun(db.agentQueryRow(`SELECT `+runCols+` FROM agent_runs WHERE id=?`, id))
+}
+func (db *DB) ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID string, limit int) ([]store.AgentRun, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	query := `SELECT ` + runCols + ` FROM agent_runs WHERE bot_id=?`
+	args := []any{botID}
+	if beforeCreatedAt > 0 {
+		query += ` AND (created_at<? OR (created_at=? AND id<?))`
+		args = append(args, beforeCreatedAt, beforeCreatedAt, beforeID)
+	}
+	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.agentQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AgentRun
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
 }
 func (db *DB) TransitionAgentRun(id, from, to, code, message string) (bool, error) {
 	if !store.ValidAgentRunTransition(from, to) {
@@ -240,6 +302,22 @@ func (db *DB) CreateAgentToolCall(c *store.AgentToolCall) (*store.AgentToolCall,
 }
 func (db *DB) GetAgentToolCall(run, id string) (*store.AgentToolCall, error) {
 	return scanCall(db.agentQueryRow(`SELECT `+callCols+` FROM agent_tool_calls WHERE run_id=? AND id=?`, run, id))
+}
+func (db *DB) ListAgentToolCalls(runID string) ([]store.AgentToolCall, error) {
+	rows, err := db.agentQuery(`SELECT `+callCols+` FROM agent_tool_calls WHERE run_id=? ORDER BY created_at,id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AgentToolCall
+	for rows.Next() {
+		call, err := scanCall(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *call)
+	}
+	return out, rows.Err()
 }
 func (db *DB) TransitionAgentToolCall(run, id, from, to string, result json.RawMessage, resultRef, code, message string) (bool, error) {
 	if !store.ValidAgentToolTransition(from, to) {

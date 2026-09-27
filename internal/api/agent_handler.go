@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/openilink/openilink-hub/internal/agent"
@@ -68,15 +71,17 @@ func (s *Server) handleAgentSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		settings, err := s.Store.GetBotAgentSettings(bot.ID)
-		if err != nil {
-			if agent.IsNotFound(err) {
-				writeJSON(w, http.StatusOK, map[string]any{"bot_id": bot.ID, "routing_mode": "off"})
-				return
-			}
+		if err != nil && !agent.IsNotFound(err) {
 			jsonError(w, "load settings failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, settings)
+		if settings == nil {
+			settings = &store.BotAgentSettings{BotID: bot.ID, RoutingMode: "off"}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"settings":          settings,
+			"runtime_available": s.agentRuntimeAvailable(),
+		})
 		return
 	}
 	var req struct {
@@ -97,7 +102,8 @@ func (s *Server) handleAgentSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.ProfileID != "" {
-		if _, err := s.Store.GetAgentProfile(req.ProfileID); err != nil {
+		profile, err := s.Store.GetAgentProfile(req.ProfileID)
+		if err != nil || profile.OwnerID != bot.UserID || profile.Runtime != "pi" || !profile.Enabled {
 			jsonError(w, "profile not found", http.StatusBadRequest)
 			return
 		}
@@ -127,13 +133,100 @@ func (s *Server) handleAgentTools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, catalog)
 }
 
+func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
+	bot, ok := s.ownedBot(w, r)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	beforeAt, beforeID, err := parseAgentRunCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		jsonError(w, "invalid cursor", http.StatusBadRequest)
+		return
+	}
+	runs, err := s.Store.ListAgentRunsByBot(bot.ID, beforeAt, beforeID, limit+1)
+	if err != nil {
+		jsonError(w, "load runs failed", http.StatusInternalServerError)
+		return
+	}
+	next := ""
+	if len(runs) > limit {
+		runs = runs[:limit]
+		last := runs[len(runs)-1]
+		next = fmt.Sprintf("%d.%s", last.CreatedAt, last.ID)
+	}
+	views := make([]agentRunView, len(runs))
+	for i := range runs {
+		views[i] = newAgentRunView(&runs[i])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": views, "next_cursor": next})
+}
+
+func (s *Server) handleAgentConversations(w http.ResponseWriter, r *http.Request) {
+	bot, ok := s.ownedBot(w, r)
+	if !ok {
+		return
+	}
+	conversations, err := s.Store.ListAgentConversationsByBot(bot.ID, 100)
+	if err != nil {
+		jsonError(w, "load conversations failed", http.StatusInternalServerError)
+		return
+	}
+	views := make([]agentConversationView, len(conversations))
+	for i := range conversations {
+		views[i] = newAgentConversationView(&conversations[i])
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
 func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	run, ok := s.ownedRun(w, r)
 	if !ok {
 		return
 	}
-	events, _ := s.Store.ListAgentRunEvents(run.ID, 0, 1000)
-	writeJSON(w, http.StatusOK, map[string]any{"run": run, "events": events})
+	events, err := s.Store.ListAgentRunEvents(run.ID, 0, 1000)
+	if err != nil {
+		jsonError(w, "load run events failed", http.StatusInternalServerError)
+		return
+	}
+	conversation, err := s.Store.GetAgentConversation(run.ConversationID)
+	if err != nil || conversation.BotID != run.BotID {
+		jsonError(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	calls, err := s.Store.ListAgentToolCalls(run.ID)
+	if err != nil {
+		jsonError(w, "load tool calls failed", http.StatusInternalServerError)
+		return
+	}
+	callViews := make([]agentToolCallView, len(calls))
+	for i := range calls {
+		callViews[i] = agentToolCallView{
+			ID: calls[i].ID, ToolName: calls[i].ToolName, Effect: calls[i].Effect,
+			Status: calls[i].Status, ErrorCode: calls[i].ErrorCode,
+			CreatedAt: calls[i].CreatedAt, UpdatedAt: calls[i].UpdatedAt,
+		}
+	}
+	eventViews := make([]agentRunEventView, len(events))
+	for i := range events {
+		eventViews[i] = agentRunEventView{
+			RunID: events[i].RunID, Seq: events[i].Seq,
+			EventType: events[i].EventType, CreatedAt: events[i].CreatedAt,
+		}
+		var payload struct {
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if json.Unmarshal(events[i].SanitizedPayload, &payload) == nil && payload.ConfirmationID != "" {
+			eventViews[i].SanitizedPayload = map[string]string{"confirmation_id": payload.ConfirmationID}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run": newAgentRunView(run), "conversation": newAgentConversationView(conversation),
+		"events": eventViews, "tool_calls": callViews,
+	})
 }
 
 func (s *Server) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +234,7 @@ func (s *Server) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if s.AgentCoordinator == nil {
+	if !s.agentRuntimeAvailable() {
 		jsonError(w, "agent runtime unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -210,6 +303,15 @@ func (s *Server) handleAgentConfirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleAgentProfileList(w http.ResponseWriter, r *http.Request) {
+	profiles, err := s.Store.ListAgentProfilesByOwner(auth.UserIDFromContext(r.Context()))
+	if err != nil {
+		jsonError(w, "load profiles failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, profiles)
+}
+
 func (s *Server) handleAgentProfileCreate(w http.ResponseWriter, r *http.Request) {
 	var profile store.AgentProfile
 	if json.NewDecoder(r.Body).Decode(&profile) != nil || profile.ModelProfile == "" {
@@ -228,6 +330,11 @@ func (s *Server) handleAgentProfileCreate(w http.ResponseWriter, r *http.Request
 func (s *Server) handleAgentProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	profile, err := s.Store.GetAgentProfile(r.PathValue("profileID"))
 	if err != nil {
+		jsonError(w, "profile not found", http.StatusNotFound)
+		return
+	}
+	isAdminRoute := strings.HasPrefix(r.URL.Path, "/api/admin/")
+	if !isAdminRoute && profile.OwnerID != auth.UserIDFromContext(r.Context()) {
 		jsonError(w, "profile not found", http.StatusNotFound)
 		return
 	}
@@ -268,6 +375,81 @@ func (s *Server) handleBotAPIToolResult(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+type agentRunView struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	BotID          string `json:"bot_id"`
+	RunKind        string `json:"run_kind"`
+	Status         string `json:"status"`
+	Runtime        string `json:"runtime"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+}
+
+func newAgentRunView(run *store.AgentRun) agentRunView {
+	return agentRunView{
+		ID: run.ID, ConversationID: run.ConversationID, BotID: run.BotID,
+		RunKind: run.RunKind, Status: run.Status, Runtime: run.Runtime,
+		ErrorCode: run.ErrorCode, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
+	}
+}
+
+type agentConversationView struct {
+	ID                 string `json:"id"`
+	BotID              string `json:"bot_id"`
+	Provider           string `json:"provider"`
+	Epoch              int64  `json:"epoch"`
+	LastCompletedRunID string `json:"last_completed_run_id"`
+	CreatedAt          int64  `json:"created_at"`
+	UpdatedAt          int64  `json:"updated_at"`
+}
+
+func newAgentConversationView(conversation *store.AgentConversation) agentConversationView {
+	return agentConversationView{
+		ID: conversation.ID, BotID: conversation.BotID, Provider: conversation.Provider,
+		Epoch: conversation.Epoch, LastCompletedRunID: conversation.LastCompletedRunID,
+		CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt,
+	}
+}
+
+type agentRunEventView struct {
+	RunID            string            `json:"run_id"`
+	Seq              int64             `json:"seq"`
+	EventType        string            `json:"event_type"`
+	SanitizedPayload map[string]string `json:"sanitized_payload"`
+	CreatedAt        int64             `json:"created_at"`
+}
+
+type agentToolCallView struct {
+	ID        string `json:"id"`
+	ToolName  string `json:"tool_name"`
+	Effect    string `json:"effect"`
+	Status    string `json:"status"`
+	ErrorCode string `json:"error_code,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+func (s *Server) agentRuntimeAvailable() bool {
+	return s.AgentCoordinator != nil && s.AgentCoordinator.Runtime != nil && s.AgentCoordinator.Catalog != nil && s.AgentCoordinator.ServiceToken != ""
+}
+
+func parseAgentRunCursor(cursor string) (int64, string, error) {
+	if cursor == "" {
+		return 0, "", nil
+	}
+	separator := strings.IndexByte(cursor, '.')
+	if separator < 1 || separator == len(cursor)-1 {
+		return 0, "", errors.New("invalid cursor")
+	}
+	createdAt, err := strconv.ParseInt(cursor[:separator], 10, 64)
+	if err != nil || createdAt <= 0 {
+		return 0, "", errors.New("invalid cursor")
+	}
+	return createdAt, cursor[separator+1:], nil
 }
 
 func (s *Server) ownedBot(w http.ResponseWriter, r *http.Request) (*store.Bot, bool) {

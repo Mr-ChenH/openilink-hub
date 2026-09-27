@@ -15,7 +15,14 @@ export const queryKeys = {
     stats: () => ["bots", "stats"] as const,
     webhookLogs: (botId: string, channelId?: string, limit = 50) =>
       ["bots", botId, "webhook-logs", { channelId, limit }] as const,
+    agentSettings: (id: string) => ["bots", id, "agent", "settings"] as const,
+    agentTools: (id: string) => ["bots", id, "agent", "tools"] as const,
+    agentRuns: (id: string) => ["bots", id, "agent", "runs"] as const,
+    agentRun: (id: string, runId: string) => ["bots", id, "agent", "runs", runId] as const,
+    agentConversations: (id: string) => ["bots", id, "agent", "conversations"] as const,
   },
+
+  agentProfiles: () => ["agent", "profiles"] as const,
 
   apps: {
     all: (opts?: { listing?: string }) => ["apps", opts] as const,

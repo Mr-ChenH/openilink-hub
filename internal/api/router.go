@@ -148,12 +148,18 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /api/bots/{id}/reconnect", s.handleReconnect)
 	protected.HandleFunc("DELETE /api/bots/{id}", s.handleDeleteBot)
 
+	protected.HandleFunc("GET /api/agent/profiles", s.handleAgentProfileList)
+	protected.HandleFunc("POST /api/agent/profiles", s.handleAgentProfileCreate)
+	protected.HandleFunc("PUT /api/agent/profiles/{profileID}", s.handleAgentProfileUpdate)
+
 	protected.HandleFunc("GET /api/bots/{id}/agent/settings", s.handleAgentSettings)
 	protected.HandleFunc("PUT /api/bots/{id}/agent/settings", s.handleAgentSettings)
 	protected.HandleFunc("GET /api/bots/{id}/agent/tools", s.handleAgentTools)
+	protected.HandleFunc("GET /api/bots/{id}/agent/runs", s.handleAgentRuns)
 	protected.HandleFunc("GET /api/bots/{id}/agent/runs/{runID}", s.handleAgentRun)
 	protected.HandleFunc("POST /api/bots/{id}/agent/runs/{runID}/cancel", s.handleAgentCancel)
 	protected.HandleFunc("POST /api/bots/{id}/agent/runs/{runID}/confirmations/{confirmationID}", s.handleAgentConfirm)
+	protected.HandleFunc("GET /api/bots/{id}/agent/conversations", s.handleAgentConversations)
 	protected.HandleFunc("POST /api/bots/{id}/agent/conversations/{conversationID}/reset", s.handleAgentReset)
 
 	// Webhook logs

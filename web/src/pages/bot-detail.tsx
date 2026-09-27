@@ -48,6 +48,7 @@ import { Input } from "@/components/ui/input";
 import { AppIcon } from "../components/app-icon";
 import { parseTools } from "../components/tools-display";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { BotAgentSettings } from "./bot-agent-settings";
 const DEFAULT_MODEL = "__default__";
 
 // ==================== Page ====================
@@ -440,6 +441,8 @@ export function BotDetailPage() {
           </Tooltip>
         </div>
       </div>
+
+      <BotAgentSettings botId={bot.id} />
 
       {/* Installed Apps + Marketplace */}
       <>

@@ -21,6 +21,14 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	if err != nil || gotProfile.ModelProfile != "fast" {
 		t.Fatalf("GetAgentProfile: got=%+v err=%v", gotProfile, err)
 	}
+	otherProfile := &store.AgentProfile{ID: "profile-other", OwnerID: "owner-2", Runtime: "pi", ModelProfile: "other", Enabled: true}
+	if err := s.CreateAgentProfile(otherProfile); err != nil {
+		t.Fatalf("CreateAgentProfile other: %v", err)
+	}
+	profiles, err := s.ListAgentProfilesByOwner(profile.OwnerID)
+	if err != nil || len(profiles) != 1 || profiles[0].ID != profile.ID {
+		t.Fatalf("ListAgentProfilesByOwner: got=%+v err=%v", profiles, err)
+	}
 
 	settings := &store.BotAgentSettings{BotID: "bot-agent-1", ProfileID: profile.ID, RoutingMode: "pi", TriggerPolicy: json.RawMessage(`{"private":true}`), ToolPolicy: json.RawMessage(`{"default":"confirm"}`)}
 	if err := s.PutBotAgentSettings(settings); err != nil {
@@ -46,6 +54,10 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	if err != nil || inserted || gotConv.ID != conv.ID {
 		t.Fatalf("replay conversation: got=%+v inserted=%v err=%v", gotConv, inserted, err)
 	}
+	conversations, err := s.ListAgentConversationsByBot(conv.BotID, 10)
+	if err != nil || len(conversations) != 1 || conversations[0].ID != conv.ID {
+		t.Fatalf("ListAgentConversationsByBot: got=%+v err=%v", conversations, err)
+	}
 
 	run := &store.AgentRun{ID: "run-1", ConversationID: conv.ID, BotID: conv.BotID, InboundMessageID: "msg-1", RunKind: "message", Runtime: "pi", CatalogVersion: "cat-1"}
 	gotRun, inserted, err := s.CreateAgentRun(run)
@@ -55,6 +67,14 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	_, inserted, err = s.CreateAgentRun(run)
 	if err != nil || inserted {
 		t.Fatalf("idempotent run replay: inserted=%v err=%v", inserted, err)
+	}
+	runs, err := s.ListAgentRunsByBot(conv.BotID, 0, "", 10)
+	if err != nil || len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("ListAgentRunsByBot: got=%+v err=%v", runs, err)
+	}
+	cursorRuns, err := s.ListAgentRunsByBot(conv.BotID, runs[0].CreatedAt, runs[0].ID, 10)
+	if err != nil || len(cursorRuns) != 0 {
+		t.Fatalf("ListAgentRunsByBot cursor: got=%+v err=%v", cursorRuns, err)
 	}
 	conflict := *run
 	conflict.Runtime = "native"
@@ -107,6 +127,10 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 	gotCall, err = s.GetAgentToolCall(run.ID, call.ID)
 	if err != nil || gotCall.Attempt != 1 || gotCall.Status != store.AgentToolSucceeded {
 		t.Fatalf("completed call: got=%+v err=%v", gotCall, err)
+	}
+	calls, err := s.ListAgentToolCalls(run.ID)
+	if err != nil || len(calls) != 1 || calls[0].ID != call.ID {
+		t.Fatalf("ListAgentToolCalls: got=%+v err=%v", calls, err)
 	}
 
 	confirmation := &store.AgentConfirmation{ID: "confirmation-1", CallID: call.ID, SenderID: conv.SenderID, CodeHash: "code", ArgsHash: call.ArgsHash, ExpiresAt: 500}
