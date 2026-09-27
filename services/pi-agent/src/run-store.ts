@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { sanitizeEventData } from "./event-policy.js";
 import type { CreateRunRequest, RunEvent, RunRecord } from "./types.js";
 
@@ -23,7 +25,36 @@ export class RunStore {
   readonly #runs = new Map<string, RunRecord>();
   readonly #listeners = new Map<string, Set<(event: RunEvent) => void>>();
 
-  constructor(private readonly eventLimit: number) {}
+  constructor(private readonly eventLimit: number, private readonly filePath?: string) {
+    if (!filePath) return;
+    mkdirSync(dirname(filePath), { recursive: true });
+    try {
+      const records = JSON.parse(readFileSync(filePath, "utf8")) as RunRecord[];
+      for (const run of records) this.#runs.set(run.id, run);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let changed = false;
+    for (const run of this.#runs.values()) {
+      if (run.status !== "queued" && run.status !== "running") continue;
+      run.status = "interrupted";
+      run.finishedAt = new Date().toISOString();
+      run.error = { code: "sidecar_restarted", message: "agent sidecar restarted during execution" };
+      const data = sanitizeEventData("run.interrupted", run.error) ?? {};
+      const event: RunEvent = {
+        seq: (run.events.at(-1)?.seq ?? 0) + 1,
+        run_id: run.id,
+        type: "run.interrupted",
+        timestamp: run.finishedAt,
+        data,
+      };
+      run.events.push(event);
+      if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
+      this.#scrubTerminal(run);
+      changed = true;
+    }
+    if (changed) this.#persist();
+  }
 
   create(request: CreateRunRequest): { run: RunRecord; created: boolean } {
     const hash = requestHash(request);
@@ -41,6 +72,7 @@ export class RunStore {
       events: [],
     };
     this.#runs.set(run.id, run);
+    this.#persist();
     return { run, created: true };
   }
 
@@ -60,18 +92,32 @@ export class RunStore {
     };
     run.events.push(event);
     if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
+    this.#persist();
     for (const listener of this.#listeners.get(run.id) ?? []) listener(event);
     return event;
   }
 
   scrubTerminal(run: RunRecord): void {
-    if (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled") return;
+    if (!this.#scrubTerminal(run)) return;
+    this.#persist();
+  }
+
+  #scrubTerminal(run: RunRecord): boolean {
+    if (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled" && run.status !== "interrupted") return false;
     const { tool_capability: _discardedCapability, ...retained } = run.request;
     run.request = {
       ...retained,
       input: { ...retained.input, text: "" },
       tools: [],
     };
+    return true;
+  }
+
+  #persist(): void {
+    if (!this.filePath) return;
+    const temporary = `${this.filePath}.tmp`;
+    writeFileSync(temporary, JSON.stringify([...this.#runs.values()]), { encoding: "utf8", mode: 0o600 });
+    renameSync(temporary, this.filePath);
   }
 
   observe(id: string, afterSeq: number, listener: (event: RunEvent) => void): { replay: RunEvent[]; close(): void } {
@@ -100,7 +146,7 @@ export function publicRun(run: RunRecord): Record<string, unknown> {
     created_at: run.createdAt,
     ...(run.startedAt ? { started_at: run.startedAt } : {}),
     ...(run.finishedAt ? { finished_at: run.finishedAt } : {}),
-    ...(run.result ? { result: run.result } : {}),
-    ...(run.error ? { error: run.error } : {}),
+    ...(run.result ? { result: run.result, text: run.result.text } : {}),
+    ...(run.error ? { error: run.error.message, error_code: run.error.code } : {}),
   };
 }

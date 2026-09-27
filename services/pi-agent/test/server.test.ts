@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
@@ -39,6 +42,7 @@ class MockRuntime implements AgentRuntime {
 }
 
 const servers: Array<ReturnType<typeof createApp>["server"]> = [];
+const temporaryDirectories: string[] = [];
 
 function config(overrides: Partial<ServiceConfig> = {}): ServiceConfig {
   return {
@@ -62,7 +66,9 @@ function config(overrides: Partial<ServiceConfig> = {}): ServiceConfig {
 }
 
 async function app(runtime = new MockRuntime(), overrides: Partial<ServiceConfig> = {}) {
-  const created = createApp(config(overrides), runtime);
+  const sessionDir = overrides.sessionDir ?? mkdtempSync(join(tmpdir(), "pi-agent-test-"));
+  if (!overrides.sessionDir) temporaryDirectories.push(sessionDir);
+  const created = createApp(config({ ...overrides, sessionDir }), runtime);
   created.server.listen(0, "127.0.0.1");
   await once(created.server, "listening");
   servers.push(created.server);
@@ -105,6 +111,7 @@ afterEach(async () => {
     server.closeAllConnections();
     server.close(() => resolve());
   })));
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 test("health is public while run APIs require service authentication", async () => {
@@ -184,6 +191,40 @@ test("SSE replays events after Last-Event-ID and closes at terminal state", asyn
   assert.equal(stored?.request.input.text, "");
   assert.equal(stored?.request.tool_capability, undefined);
   assert.deepEqual(stored?.request.tools, []);
+});
+
+test("restart persists identity and exposes in-flight work as interrupted without re-execution", async () => {
+  const sessionDir = mkdtempSync(join(tmpdir(), "pi-agent-restart-"));
+  temporaryDirectories.push(sessionDir);
+  const first = await app(new MockRuntime(), { sessionDir });
+  const request = run("restart-run");
+  assert.equal((await create(first.base, request)).status, 202);
+  await waitFor(() => first.runtime.started.length === 1);
+
+  first.server.closeAllConnections();
+  await new Promise<void>((resolve) => first.server.close(() => resolve()));
+  servers.splice(servers.indexOf(first.server), 1);
+
+  const secondRuntime = new MockRuntime();
+  const second = await app(secondRuntime, { sessionDir });
+  const recovered = await fetch(`${second.base}/v1/runs/restart-run`, { headers: headers() });
+  const recoveredBody = await recovered.json() as { status: string; error_code: string };
+  assert.equal(recoveredBody.status, "interrupted");
+  assert.equal(recoveredBody.error_code, "sidecar_restarted");
+  const persisted = second.store.get("restart-run");
+  assert.equal(persisted?.request.input.text, "");
+  assert.equal(persisted?.request.tool_capability, undefined);
+  assert.deepEqual(persisted?.request.tools, []);
+  assert.equal((await create(second.base, request)).status, 202);
+  assert.equal(secondRuntime.started.length, 0);
+
+  const events = await fetch(`${second.base}/v1/runs/restart-run/events`, { headers: headers() });
+  assert.match(await events.text(), /event: run.interrupted/);
+
+  // Release the first process's mock promise so the in-process crash simulation
+  // leaves no scheduler work behind after the test.
+  first.runtime.finish("restart-run", "ignored");
+  await new Promise((resolve) => setTimeout(resolve, 20));
 });
 
 test("validation requires capability for dynamic tools and preserves raw slash text", async () => {

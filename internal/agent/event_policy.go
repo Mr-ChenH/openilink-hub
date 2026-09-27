@@ -38,7 +38,7 @@ func sanitizeRuntimeEvent(event RuntimeEvent) (json.RawMessage, bool) {
 		if text, ok := data["text"].(string); ok {
 			clean["text_length"] = utf8.RuneCountInString(text)
 		}
-	case "run.failed":
+	case "run.failed", "run.interrupted":
 		copyBoundedString(clean, data, "code", 128)
 	default:
 		return nil, false

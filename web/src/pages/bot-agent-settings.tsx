@@ -70,7 +70,6 @@ export function BotAgentSettings({ botId }: { botId: string }) {
   const [settings, setSettings] = useState<BotAgentSettings | null>(null);
   const [newModel, setNewModel] = useState("");
   const [selectedRun, setSelectedRun] = useState("");
-  const [confirmationCode, setConfirmationCode] = useState("");
   const runDetail = useAgentRun(botId, selectedRun);
 
   useEffect(() => {
@@ -138,11 +137,10 @@ export function BotAgentSettings({ botId }: { botId: string }) {
   const profiles = profilesQuery.data ?? [];
   const tools = toolsQuery.data?.tools ?? [];
   const detail = runDetail.data;
-  const confirmationEvent = detail?.events.find((event) => {
-    const id = event.sanitized_payload?.confirmation_id;
-    return typeof id === "string" && id.length > 0;
-  });
-  const confirmationId = confirmationEvent?.sanitized_payload.confirmation_id as string | undefined;
+  const pendingConfirmation = detail?.tool_calls.find(
+    (call) => call.status === "awaiting_confirmation" && call.confirmation_id,
+  );
+  const confirmationId = pendingConfirmation?.confirmation_id;
 
   return (
     <section
@@ -348,24 +346,29 @@ export function BotAgentSettings({ botId }: { botId: string }) {
                     </div>
                     {run.status === "waiting_confirmation" && confirmationId ? (
                       <div className="flex max-w-sm gap-2">
-                        <Input
-                          value={confirmationCode}
-                          onChange={(event) => setConfirmationCode(event.target.value)}
-                          placeholder="确认码"
-                          type="password"
-                        />
                         <Button
                           size="sm"
-                          disabled={!confirmationCode || confirmTool.isPending}
+                          disabled={confirmTool.isPending}
                           onClick={() =>
-                            confirmTool.mutate(
-                              { runId: run.id, confirmationId, code: confirmationCode },
-                              { onSuccess: () => setConfirmationCode("") },
-                            )
+                            confirmTool.mutate({
+                              runId: run.id,
+                              confirmationId,
+                              decision: "approve",
+                            })
                           }
                         >
                           <ShieldCheck className="h-3.5 w-3.5" />
-                          确认
+                          允许
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={confirmTool.isPending}
+                          onClick={() =>
+                            confirmTool.mutate({ runId: run.id, confirmationId, decision: "deny" })
+                          }
+                        >
+                          拒绝
                         </Button>
                       </div>
                     ) : null}

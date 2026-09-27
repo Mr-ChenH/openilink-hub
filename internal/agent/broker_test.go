@@ -21,6 +21,10 @@ func (s *installationReaderStub) GetInstallation(string) (*store.AppInstallation
 	return s.installation, nil
 }
 
+type allowAuthorizer struct{}
+
+func (allowAuthorizer) AuthorizeTool(context.Context, AuthorizationRequest) error { return nil }
+
 type dispatcherStub struct {
 	calls   int
 	request DispatchRequest
@@ -59,6 +63,7 @@ func TestBrokerDispatchesResolvedRouteExactlyOnce(t *testing.T) {
 		Installations: &installationReaderStub{&store.AppInstallation{
 			ID: "inst", AppID: "app", BotID: "bot", Enabled: true,
 		}},
+		Authorizer: allowAuthorizer{},
 		Dispatcher: dispatcher,
 	}
 	result, err := broker.Execute(context.Background(), testCall())

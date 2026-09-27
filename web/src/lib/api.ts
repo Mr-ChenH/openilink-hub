@@ -61,8 +61,17 @@ export interface BotAgentSettings {
   bot_id: string;
   profile_id: string;
   routing_mode: "off" | "agent";
-  trigger_policy: { private?: boolean; groups?: boolean };
-  tool_policy: { default?: "allow" | "confirm" | "deny" };
+  trigger_policy: {
+    private?: boolean;
+    groups?: boolean;
+    require_explicit?: boolean;
+    senders?: string[];
+    group_ids?: string[];
+  };
+  tool_policy: {
+    default?: "allow" | "confirm" | "deny";
+    tools?: Record<string, "allow" | "confirm" | "deny">;
+  };
   created_at?: number;
   updated_at?: number;
 }
@@ -105,6 +114,7 @@ export interface AgentRunDetail {
     tool_name: string;
     effect: string;
     status: string;
+    confirmation_id?: string;
     error_code?: string;
     error_message?: string;
     created_at: number;
@@ -245,10 +255,15 @@ export const api = {
     request<AgentConversation>(`/api/bots/${botId}/agent/conversations/${conversationId}/reset`, {
       method: "POST",
     }),
-  confirmAgentTool: (botId: string, runId: string, confirmationId: string, code: string) =>
+  confirmAgentTool: (
+    botId: string,
+    runId: string,
+    confirmationId: string,
+    decision: "approve" | "deny",
+  ) =>
     request<{ ok: boolean }>(
       `/api/bots/${botId}/agent/runs/${runId}/confirmations/${confirmationId}`,
-      { method: "POST", body: JSON.stringify({ code }) },
+      { method: "POST", body: JSON.stringify({ decision }) },
     ),
 
   // Channels (under bots)

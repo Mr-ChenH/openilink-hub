@@ -31,7 +31,7 @@ const (
 func ValidAgentRunTransition(from, to string) bool {
 	switch from {
 	case AgentRunQueued:
-		return to == AgentRunRunning || to == AgentRunFailed || to == AgentRunCancelled || to == AgentRunInterrupted
+		return to == AgentRunRunning || to == AgentRunCompleted || to == AgentRunFailed || to == AgentRunCancelled || to == AgentRunInterrupted
 	case AgentRunRunning:
 		return to == AgentRunWaitingTool || to == AgentRunWaitingConfirmation || to == AgentRunCompleted || to == AgentRunFailed || to == AgentRunCancelled || to == AgentRunInterrupted
 	case AgentRunWaitingTool, AgentRunWaitingConfirmation:
@@ -139,16 +139,20 @@ type AgentToolCall struct {
 	ResultRef      string          `json:"result_ref"`
 	ErrorCode      string          `json:"error_code"`
 	ErrorMessage   string          `json:"error_message"`
+	ConfirmationID string          `json:"confirmation_id,omitempty"`
 	CreatedAt      int64           `json:"created_at"`
 	UpdatedAt      int64           `json:"updated_at"`
 }
 
 type AgentConfirmation struct {
 	ID        string `json:"id"`
+	RunID     string `json:"run_id"`
 	CallID    string `json:"call_id"`
+	OwnerID   string `json:"owner_id"`
 	SenderID  string `json:"sender_id"`
 	CodeHash  string `json:"code_hash"`
 	ArgsHash  string `json:"args_hash"`
+	Decision  string `json:"decision,omitempty"`
 	ExpiresAt int64  `json:"expires_at"`
 	UsedAt    int64  `json:"used_at"`
 	CreatedAt int64  `json:"created_at"`
@@ -196,8 +200,11 @@ type AgentStore interface {
 	CreateAgentRun(run *AgentRun) (*AgentRun, bool, error)
 	GetAgentRun(id string) (*AgentRun, error)
 	ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID string, limit int) ([]AgentRun, error)
+	ListNonterminalAgentRuns(limit int) ([]AgentRun, error)
 	TransitionAgentRun(id, fromStatus, toStatus, errorCode, errorMessage string) (bool, error)
+	TransitionAgentRunFenced(id string, fence int64, fromStatus, toStatus, errorCode, errorMessage string) (bool, error)
 	AcquireAgentRunLease(id, owner string, now, leaseUntil int64) (fence int64, acquired bool, err error)
+	RenewAgentRunLease(id, owner string, fence, leaseUntil int64) (bool, error)
 
 	CreateAgentToolCall(call *AgentToolCall) (*AgentToolCall, bool, error)
 	GetAgentToolCall(runID, callID string) (*AgentToolCall, error)
@@ -207,8 +214,12 @@ type AgentStore interface {
 	CreateAgentConfirmation(confirmation *AgentConfirmation) error
 	GetAgentConfirmation(id string) (*AgentConfirmation, error)
 	ConsumeAgentConfirmation(id, senderID, codeHash, argsHash string, now int64) (bool, error)
+	AwaitAgentToolConfirmation(runID, callID string, confirmation *AgentConfirmation) (bool, error)
+	ResolveAgentToolConfirmation(id, runID, callID, ownerID, argsHash, decision string, now int64) (bool, error)
+	ExpireAgentToolConfirmation(id, runID, callID string, now int64) (bool, error)
 
 	AppendAgentRunEvent(event *AgentRunEvent) (bool, error)
+	AppendAgentRunEventFenced(event *AgentRunEvent, fence int64) (bool, error)
 	ListAgentRunEvents(runID string, afterSeq int64, limit int) ([]AgentRunEvent, error)
 
 	CreateAgentOutboxItem(item *AgentOutboxItem) (*AgentOutboxItem, bool, error)

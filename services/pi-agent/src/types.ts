@@ -1,4 +1,4 @@
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 export interface ToolSpec {
   name: string;
@@ -31,7 +31,8 @@ export interface RunEvent {
     | "usage.updated"
     | "run.completed"
     | "run.failed"
-    | "run.cancelled";
+    | "run.cancelled"
+    | "run.interrupted";
   timestamp: string;
   data: Record<string, unknown>;
 }

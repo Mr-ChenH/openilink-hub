@@ -91,7 +91,14 @@ export function useResetAgentConversation(botId: string) {
 export function useConfirmAgentTool(botId: string) {
   return useAgentAction(
     botId,
-    ({ runId, confirmationId, code }: { runId: string; confirmationId: string; code: string }) =>
-      api.confirmAgentTool(botId, runId, confirmationId, code),
+    ({
+      runId,
+      confirmationId,
+      decision,
+    }: {
+      runId: string;
+      confirmationId: string;
+      decision: "approve" | "deny";
+    }) => api.confirmAgentTool(botId, runId, confirmationId, decision),
   );
 }

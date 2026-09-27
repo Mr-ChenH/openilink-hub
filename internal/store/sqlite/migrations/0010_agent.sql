@@ -77,6 +77,7 @@ CREATE TABLE agent_tool_calls (
     result_ref TEXT NOT NULL DEFAULT '',
     error_code TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
+    confirmation_id TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (run_id, id)
@@ -85,10 +86,13 @@ CREATE INDEX idx_agent_tool_calls_status ON agent_tool_calls(status, updated_at)
 
 CREATE TABLE agent_confirmations (
     id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
     call_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL DEFAULT '',
     sender_id TEXT NOT NULL,
     code_hash TEXT NOT NULL,
     args_hash TEXT NOT NULL,
+    decision TEXT NOT NULL DEFAULT '' CHECK (decision IN ('','approve','deny')),
     expires_at INTEGER NOT NULL,
     used_at INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())

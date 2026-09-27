@@ -7,6 +7,44 @@ import { createHubTools } from "../src/hub-tools.js";
 import { DEFAULT_PROMPT_VERSION, isolatedResourceLoader } from "../src/resource-loader.js";
 import type { CreateRunRequest } from "../src/types.js";
 
+test("confirmation retries only the same authorized call", async () => {
+  const bodies: unknown[] = [];
+  const hub = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk as Uint8Array));
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    response.setHeader("content-type", "application/json");
+    if (bodies.length === 1) {
+      response.writeHead(409);
+      response.end(JSON.stringify({ status: "failed", confirmation_id: "confirmation-1", error: { code: "confirmation_required", message: "confirm" } }));
+      return;
+    }
+    response.writeHead(200);
+    response.end(JSON.stringify({ status: "succeeded", text: "approved" }));
+  });
+  hub.listen(0, "127.0.0.1");
+  await once(hub, "listening");
+  const address = hub.address() as AddressInfo;
+  const request: CreateRunRequest = {
+    protocol_version: 1, run_id: "run-confirm", conversation_id: "conversation", session_epoch: 1,
+    input: { message_id: "message", text: "write" }, model_profile: "default", catalog_version: "catalog-v1",
+    tool_capability: "run-secret", tools: [{ name: "write", description: "Write", parameters: { type: "object", properties: {} } }],
+  };
+  const [tool] = createHubTools({
+    request, hubBaseUrl: `http://127.0.0.1:${address.port}`, serviceToken: "service-secret", timeoutMs: 100,
+    maxToolCalls: 1, onStarted: () => {}, onCompleted: () => {},
+  });
+  try {
+    const result = await tool!.execute("call-confirm", { value: 1 }, undefined, undefined, undefined as never);
+    assert.deepEqual(result.content, [{ type: "text", text: "approved" }]);
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies[1], bodies[0]);
+  } finally {
+    hub.closeAllConnections();
+    await new Promise<void>((resolve) => hub.close(() => resolve()));
+  }
+});
+
 test("isolated resource loader exposes no host-discovered resources", async () => {
   const loader = isolatedResourceLoader();
   await loader.reload();

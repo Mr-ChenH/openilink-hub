@@ -251,6 +251,29 @@ func (s *Store) ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID
 	}
 	return out, nil
 }
+func (s *Store) ListNonterminalAgentRuns(limit int) ([]store.AgentRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var out []store.AgentRun
+	for _, v := range s.agentRuns {
+		if v.Status == store.AgentRunQueued || v.Status == store.AgentRunRunning || v.Status == store.AgentRunWaitingTool || v.Status == store.AgentRunWaitingConfirmation {
+			out = append(out, *runCopy(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
 func (s *Store) TransitionAgentRun(id, from, to, code, message string) (bool, error) {
 	if !store.ValidAgentRunTransition(from, to) {
 		return false, fmt.Errorf("invalid agent run transition %s -> %s", from, to)
@@ -259,6 +282,28 @@ func (s *Store) TransitionAgentRun(id, from, to, code, message string) (bool, er
 	defer s.mu.Unlock()
 	v, ok := s.agentRuns[id]
 	if !ok || v.Status != from {
+		return false, nil
+	}
+	v.Status = to
+	v.ErrorCode = code
+	v.ErrorMessage = message
+	v.UpdatedAt = unixNow()
+	if to == store.AgentRunCompleted {
+		if c := s.agentConversations[v.ConversationID]; c != nil {
+			c.LastCompletedRunID = id
+			c.UpdatedAt = v.UpdatedAt
+		}
+	}
+	return true, nil
+}
+func (s *Store) TransitionAgentRunFenced(id string, fence int64, from, to, code, message string) (bool, error) {
+	if !store.ValidAgentRunTransition(from, to) {
+		return false, fmt.Errorf("invalid agent run transition %s -> %s", from, to)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.agentRuns[id]
+	if !ok || v.Status != from || v.Fence != fence {
 		return false, nil
 	}
 	v.Status = to
@@ -291,6 +336,17 @@ func (s *Store) AcquireAgentRunLease(id, owner string, now, until int64) (int64,
 	v.Fence++
 	v.UpdatedAt = unixNow()
 	return v.Fence, true, nil
+}
+func (s *Store) RenewAgentRunLease(id, owner string, fence, until int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.agentRuns[id]
+	if !ok || v.LeaseOwner != owner || v.Fence != fence || v.Status == store.AgentRunCompleted || v.Status == store.AgentRunFailed || v.Status == store.AgentRunCancelled || v.Status == store.AgentRunInterrupted {
+		return false, nil
+	}
+	v.LeaseUntil = until
+	v.UpdatedAt = unixNow()
+	return true, nil
 }
 
 func callKey(run, id string) string { return run + "\x00" + id }
@@ -403,9 +459,88 @@ func (s *Store) ConsumeAgentConfirmation(id, sender, code, args string, now int6
 	return true, nil
 }
 
+func (s *Store) AwaitAgentToolConfirmation(runID, callID string, confirmation *store.AgentConfirmation) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call := s.agentToolCalls[callKey(runID, callID)]
+	run := s.agentRuns[runID]
+	if call == nil || run == nil || call.Status != store.AgentToolCreated || (run.Status != store.AgentRunRunning && run.Status != store.AgentRunWaitingTool) {
+		return false, nil
+	}
+	if _, exists := s.agentConfirmations[confirmation.ID]; exists {
+		return false, fmt.Errorf("confirmation already exists")
+	}
+	now := unixNow()
+	confirmation.RunID, confirmation.CallID, confirmation.CreatedAt = runID, callID, now
+	call.Status, call.ConfirmationID, call.UpdatedAt = store.AgentToolAwaitingConfirmation, confirmation.ID, now
+	run.Status, run.UpdatedAt = store.AgentRunWaitingConfirmation, now
+	s.agentConfirmations[confirmation.ID] = confirmationCopy(confirmation)
+	return true, nil
+}
+
+func (s *Store) ResolveAgentToolConfirmation(id, runID, callID, ownerID, argsHash, decision string, now int64) (bool, error) {
+	if decision != "approve" && decision != "deny" {
+		return false, fmt.Errorf("invalid confirmation decision")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	confirmation := s.agentConfirmations[id]
+	call := s.agentToolCalls[callKey(runID, callID)]
+	run := s.agentRuns[runID]
+	if confirmation == nil || call == nil || run == nil || confirmation.RunID != runID || confirmation.CallID != callID || confirmation.OwnerID != ownerID || confirmation.ArgsHash != argsHash || confirmation.UsedAt != 0 || confirmation.ExpiresAt < now || call.Status != store.AgentToolAwaitingConfirmation || call.ConfirmationID != id || run.Status != store.AgentRunWaitingConfirmation {
+		return false, nil
+	}
+	confirmation.UsedAt, confirmation.Decision = now, decision
+	if decision == "approve" {
+		call.Status = store.AgentToolAuthorized
+	} else {
+		call.Status, call.ErrorCode, call.ErrorMessage = store.AgentToolFailed, "permission_denied", "confirmation denied"
+	}
+	call.UpdatedAt = now
+	run.Status, run.UpdatedAt = store.AgentRunRunning, now
+	return true, nil
+}
+
+func (s *Store) ExpireAgentToolConfirmation(id, runID, callID string, now int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	confirmation := s.agentConfirmations[id]
+	call := s.agentToolCalls[callKey(runID, callID)]
+	run := s.agentRuns[runID]
+	if confirmation == nil || call == nil || run == nil || confirmation.RunID != runID || confirmation.CallID != callID || confirmation.UsedAt != 0 || confirmation.ExpiresAt >= now || call.Status != store.AgentToolAwaitingConfirmation || call.ConfirmationID != id || run.Status != store.AgentRunWaitingConfirmation {
+		return false, nil
+	}
+	confirmation.UsedAt, confirmation.Decision = now, "deny"
+	call.Status, call.ErrorCode, call.ErrorMessage, call.UpdatedAt = store.AgentToolTimedOut, "confirmation_expired", "confirmation expired", now
+	run.Status, run.UpdatedAt = store.AgentRunRunning, now
+	return true, nil
+}
+
 func (s *Store) AppendAgentRunEvent(v *store.AgentRunEvent) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.agentEvents[v.RunID] == nil {
+		s.agentEvents[v.RunID] = make(map[int64]store.AgentRunEvent)
+	}
+	if got, ok := s.agentEvents[v.RunID][v.Seq]; ok {
+		if got.EventType != v.EventType || !bytes.Equal(got.SanitizedPayload, v.SanitizedPayload) {
+			return false, fmt.Errorf("agent event idempotency conflict")
+		}
+		return false, nil
+	}
+	c := *v
+	c.SanitizedPayload = cloneJSON(v.SanitizedPayload)
+	c.CreatedAt = unixNow()
+	s.agentEvents[v.RunID][v.Seq] = c
+	return true, nil
+}
+func (s *Store) AppendAgentRunEventFenced(v *store.AgentRunEvent, fence int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.agentRuns[v.RunID]
+	if !ok || run.Fence != fence {
+		return false, nil
+	}
 	if s.agentEvents[v.RunID] == nil {
 		s.agentEvents[v.RunID] = make(map[int64]store.AgentRunEvent)
 	}

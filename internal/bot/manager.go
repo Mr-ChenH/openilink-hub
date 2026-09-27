@@ -60,7 +60,7 @@ func (m *Manager) SetAgentCoordinator(coordinator *agentcore.Coordinator) {
 func (m *Manager) SendAgentReply(ctx context.Context, botID, recipient, text string) (string, error) {
 	inst, ok := m.GetInstance(botID)
 	if !ok {
-		return "", fmt.Errorf("bot not connected")
+		return "", &agentcore.KnownUnsentError{Err: fmt.Errorf("bot not connected")}
 	}
 	clientID, err := inst.Send(ctx, provider.OutboundMessage{Recipient: recipient, Text: text, ContextToken: m.store.GetLatestContextTokenForRecipient(botID, recipient)})
 	if err != nil {
@@ -694,6 +694,7 @@ func (m *Manager) deliverToAgent(inst *Instance, msg provider.InboundMessage, p 
 	accepted, err := m.agent.StartMessage(context.Background(), agentcore.Inbound{
 		BotID: inst.DBID, TenantID: inst.UserID, Provider: botRecord.Provider, SenderID: msg.Sender,
 		GroupID: msg.GroupID, MessageID: agentcore.MessageKey(msg.ExternalID, msgID), Text: p.content,
+		Explicit: strings.HasPrefix(strings.TrimSpace(p.content), "@") || strings.HasPrefix(strings.TrimSpace(p.content), "/"),
 	})
 	if err != nil {
 		slog.Error("agent run start failed", "bot", inst.DBID, "message", msgID, "err", err)

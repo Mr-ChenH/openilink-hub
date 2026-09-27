@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,22 +25,49 @@ type EventRuntime interface {
 	StreamEvents(ctx context.Context, runID, lastEventID string, yield func(RuntimeEvent) error) error
 }
 
+type RecoverableEventRuntime interface {
+	EventRuntime
+	GetRun(ctx context.Context, runID string) (RunState, error)
+}
+
 type Inbound struct {
 	BotID, TenantID, Provider, SenderID, GroupID, MessageID, Text string
+	Explicit                                                      bool
+}
+
+type TriggerAuthorizer interface {
+	AllowsMessage(ctx context.Context, settings *store.BotAgentSettings, in Inbound) (bool, error)
 }
 
 type OutboundSender interface {
 	SendAgentReply(ctx context.Context, botID, recipient, text string) (string, error)
 }
 
+type DefinitelyUnsentError interface {
+	error
+	DefinitelyUnsent() bool
+}
+
+type KnownUnsentError struct{ Err error }
+
+func (e *KnownUnsentError) Error() string          { return e.Err.Error() }
+func (e *KnownUnsentError) Unwrap() error          { return e.Err }
+func (e *KnownUnsentError) DefinitelyUnsent() bool { return true }
+
 type Coordinator struct {
-	Store        store.Store
-	Runtime      EventRuntime
-	Catalog      CatalogResolver
-	Sender       OutboundSender
-	ServiceToken string
-	Timeout      time.Duration
-	MaxToolCalls int
+	Store           store.Store
+	Runtime         EventRuntime
+	Catalog         CatalogResolver
+	Sender          OutboundSender
+	ServiceToken    string
+	Timeout         time.Duration
+	MaxToolCalls    int
+	OutboxBaseDelay time.Duration
+	Policy          TriggerAuthorizer
+
+	ownerOnce sync.Once
+	ownerID   string
+	active    sync.Map
 }
 
 func (c *Coordinator) Enabled(botID string) bool {
@@ -58,7 +86,30 @@ func (c *Coordinator) StartMessage(ctx context.Context, in Inbound) (bool, error
 	if !c.Enabled(in.BotID) {
 		return false, nil
 	}
-	settings, _ := c.Store.GetBotAgentSettings(in.BotID)
+	settings, err := c.Store.GetBotAgentSettings(in.BotID)
+	if err != nil {
+		return false, err
+	}
+	bot, err := c.Store.GetBot(in.BotID)
+	if err != nil || bot.UserID != in.TenantID {
+		return false, fmt.Errorf("agent: bot tenant mismatch")
+	}
+	var allowed bool
+	if c.Policy == nil {
+		policy, parseErr := ParseTriggerPolicy(settings.TriggerPolicy)
+		if parseErr != nil {
+			return false, parseErr
+		}
+		allowed = policy.Allows(in)
+	} else {
+		allowed, err = c.Policy.AllowsMessage(ctx, settings, in)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !allowed {
+		return false, nil
+	}
 	profile, err := c.Store.GetAgentProfile(settings.ProfileID)
 	if err != nil {
 		return true, err
@@ -89,13 +140,18 @@ func (c *Coordinator) StartMessage(ctx context.Context, in Inbound) (bool, error
 		ModelProfile: profile.ModelProfile, SystemPrompt: profile.PromptVersion,
 		CatalogVersion: catalog.Version, Tools: catalog.RuntimeTools(), ToolCapability: c.RunCapability(run.ID, in.BotID), Limits: limits,
 	}
-	if _, err := c.Runtime.Start(ctx, request); err != nil {
-		if inserted {
-			_, _ = c.Store.TransitionAgentRun(run.ID, store.AgentRunQueued, store.AgentRunFailed, "runtime_start_failed", err.Error())
+	if inserted {
+		startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err = c.Runtime.Start(startCtx, request)
+		cancel()
+		if err != nil {
+			// A timed-out create may already have been accepted. Preserve the
+			// durable run and reconcile by run_id instead of issuing a second run.
+			c.startObserver(run.ID)
+			return true, err
 		}
-		return true, err
 	}
-	go c.observe(run.ID, in.SenderID)
+	c.startObserver(run.ID)
 	return true, nil
 }
 
@@ -119,46 +175,223 @@ func (c *Coordinator) limits(profile *store.AgentProfile) RunLimits {
 	return limits
 }
 
-func (c *Coordinator) observe(runID, recipient string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	err := c.Runtime.StreamEvents(ctx, runID, "", func(event RuntimeEvent) error {
-		if event.RunID != "" && event.RunID != runID {
-			return fmt.Errorf("agent: runtime event run mismatch")
+func (c *Coordinator) owner() string {
+	c.ownerOnce.Do(func() { c.ownerID = "hub-" + uuid.NewString() })
+	return c.ownerID
+}
+
+func (c *Coordinator) Run(ctx context.Context) {
+	if c == nil || c.Store == nil || c.Runtime == nil {
+		return
+	}
+	c.reconcile()
+	c.DrainOutbox(ctx)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.reconcile()
+			c.DrainOutbox(ctx)
 		}
-		payload := event.Data
-		if len(payload) == 0 {
-			payload = json.RawMessage(`{}`)
-		}
-		if sanitized, allowed := sanitizeRuntimeEvent(event); allowed {
-			if _, err := c.Store.AppendAgentRunEvent(&store.AgentRunEvent{RunID: runID, Seq: event.Seq, EventType: event.Type, SanitizedPayload: sanitized}); err != nil {
-				return err
-			}
-		}
-		switch event.Type {
-		case "run.started":
-			_, _ = c.Store.TransitionAgentRun(runID, store.AgentRunQueued, store.AgentRunRunning, "", "")
-		case "run.completed":
-			return c.complete(runID, recipient, payload)
-		case "run.failed":
-			var data struct{ Code, Message string }
-			_ = json.Unmarshal(payload, &data)
-			if run, err := c.Store.GetAgentRun(runID); err == nil {
-				_, _ = c.Store.TransitionAgentRun(runID, run.Status, store.AgentRunFailed, data.Code, data.Message)
-			}
-		case "run.cancelled":
-			if run, err := c.Store.GetAgentRun(runID); err == nil {
-				_, _ = c.Store.TransitionAgentRun(runID, run.Status, store.AgentRunCancelled, "", "")
-			}
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("agent event stream ended", "run", runID, "err", err)
 	}
 }
 
-func (c *Coordinator) complete(runID, recipient string, payload json.RawMessage) error {
+func (c *Coordinator) reconcile() {
+	runs, err := c.Store.ListNonterminalAgentRuns(500)
+	if err != nil {
+		slog.Error("agent run reconciliation failed", "err", err)
+		return
+	}
+	for i := range runs {
+		c.startObserver(runs[i].ID)
+	}
+}
+
+func (c *Coordinator) startObserver(runID string) {
+	if _, loaded := c.active.LoadOrStore(runID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer c.active.Delete(runID)
+		c.observe(runID)
+	}()
+}
+
+func (c *Coordinator) observe(runID string) {
+	run, err := c.Store.GetAgentRun(runID)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	fence, acquired, err := c.Store.AcquireAgentRunLease(runID, c.owner(), now.Unix(), now.Add(45*time.Second).Unix())
+	if err != nil || !acquired {
+		return
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(run.Deadline, 0).Add(30*time.Second))
+	defer cancel()
+	go c.renewLease(ctx, runID, fence)
+
+	lastSeq, err := c.lastEventSeq(runID)
+	if err != nil {
+		slog.Error("agent event recovery failed", "run", runID, "err", err)
+		return
+	}
+	for ctx.Err() == nil {
+		streamCtx, streamCancel := context.WithTimeout(ctx, 30*time.Second)
+		err = c.Runtime.StreamEvents(streamCtx, runID, strconv.FormatInt(lastSeq, 10), func(event RuntimeEvent) error {
+			if event.Seq <= lastSeq {
+				return nil
+			}
+			if event.RunID != runID || event.Seq != lastSeq+1 {
+				return fmt.Errorf("agent: invalid event sequence for run %s", runID)
+			}
+			if err := c.handleEvent(runID, fence, event); err != nil {
+				return err
+			}
+			lastSeq = event.Seq
+			return nil
+		})
+		streamCancel()
+		state, stateErr := c.runtimeState(runID)
+		if stateErr == nil {
+			if c.reconcileState(runID, fence, state) {
+				return
+			}
+		} else if IsRuntimeNotFound(stateErr) {
+			if current, getErr := c.Store.GetAgentRun(runID); getErr == nil {
+				c.interrupt(current, fence, "runtime_state_lost", "The agent restarted before it could finish. Please try again.")
+			}
+			return
+		}
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			slog.Warn("agent event stream reconnecting", "run", runID, "after_seq", lastSeq, "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			break
+		case <-time.After(time.Second):
+		}
+	}
+	if current, getErr := c.Store.GetAgentRun(runID); getErr == nil && current.Status != store.AgentRunCompleted && current.Status != store.AgentRunFailed && current.Status != store.AgentRunCancelled && current.Status != store.AgentRunInterrupted {
+		cancelCtx, cancelRuntime := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = c.Runtime.Cancel(cancelCtx, runID)
+		cancelRuntime()
+		c.interrupt(current, fence, "runtime_observation_timeout", "The agent could not finish in time. Please try again.")
+	}
+}
+
+func (c *Coordinator) renewLease(ctx context.Context, runID string, fence int64) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ok, err := c.Store.RenewAgentRunLease(runID, c.owner(), fence, time.Now().Add(45*time.Second).Unix())
+			if err != nil || !ok {
+				return
+			}
+		}
+	}
+}
+
+func (c *Coordinator) lastEventSeq(runID string) (int64, error) {
+	var last int64
+	for {
+		events, err := c.Store.ListAgentRunEvents(runID, last, 1000)
+		if err != nil {
+			return 0, err
+		}
+		if len(events) == 0 {
+			return last, nil
+		}
+		last = events[len(events)-1].Seq
+		if len(events) < 1000 {
+			return last, nil
+		}
+	}
+}
+
+func (c *Coordinator) handleEvent(runID string, fence int64, event RuntimeEvent) error {
+	payload := event.Data
+	if len(payload) > maxRuntimeEventBytes {
+		if run, err := c.Store.GetAgentRun(runID); err == nil && run.Fence == fence {
+			_, _ = c.Store.TransitionAgentRunFenced(runID, fence, run.Status, store.AgentRunFailed, "runtime_event_too_large", "agent runtime event payload exceeds limit")
+		}
+		return fmt.Errorf("agent: runtime event payload exceeds limit")
+	}
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	if sanitized, allowed := sanitizeRuntimeEvent(event); allowed {
+		if _, err := c.Store.AppendAgentRunEventFenced(&store.AgentRunEvent{RunID: runID, Seq: event.Seq, EventType: event.Type, SanitizedPayload: sanitized}, fence); err != nil {
+			return err
+		}
+	}
+	run, err := c.Store.GetAgentRun(runID)
+	if err != nil || run.Fence != fence {
+		return errors.New("agent: observer lease lost")
+	}
+	switch event.Type {
+	case "run.started":
+		_, err = c.Store.TransitionAgentRunFenced(runID, fence, store.AgentRunQueued, store.AgentRunRunning, "", "")
+	case "run.completed":
+		err = c.complete(run, fence, payload)
+	case "run.failed":
+		var data struct{ Code, Message string }
+		_ = json.Unmarshal(payload, &data)
+		_, err = c.Store.TransitionAgentRunFenced(runID, fence, run.Status, store.AgentRunFailed, data.Code, data.Message)
+	case "run.cancelled":
+		_, err = c.Store.TransitionAgentRunFenced(runID, fence, run.Status, store.AgentRunCancelled, "", "")
+	case "run.interrupted":
+		var data struct{ Code, Message string }
+		_ = json.Unmarshal(payload, &data)
+		c.interrupt(run, fence, data.Code, "The agent restarted before it could finish. Please try again.")
+	}
+	return err
+}
+
+func (c *Coordinator) runtimeState(runID string) (RunState, error) {
+	runtime, ok := c.Runtime.(RecoverableEventRuntime)
+	if !ok {
+		return RunState{}, errors.New("agent: runtime does not support recovery")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return runtime.GetRun(ctx, runID)
+}
+
+func (c *Coordinator) reconcileState(runID string, fence int64, state RunState) bool {
+	run, err := c.Store.GetAgentRun(runID)
+	if err != nil || run.Fence != fence {
+		return true
+	}
+	switch state.Status {
+	case RunCompleted:
+		payload, _ := json.Marshal(map[string]string{"text": state.Text})
+		if completeErr := c.complete(run, fence, payload); completeErr != nil {
+			_, _ = c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunFailed, "invalid_runtime_result", completeErr.Error())
+		}
+		return true
+	case RunFailed:
+		_, _ = c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunFailed, state.ErrorCode, state.Error)
+		return true
+	case RunCancelled:
+		_, _ = c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunCancelled, "", "")
+		return true
+	case RunInterrupted:
+		c.interrupt(run, fence, state.ErrorCode, "The agent restarted before it could finish. Please try again.")
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Coordinator) complete(run *store.AgentRun, fence int64, payload json.RawMessage) error {
 	if len(payload) > maxRuntimeEventBytes {
 		return fmt.Errorf("agent: completed run payload exceeds limit")
 	}
@@ -168,32 +401,40 @@ func (c *Coordinator) complete(runID, recipient string, payload json.RawMessage)
 	if err := json.Unmarshal(payload, &data); err != nil || strings.TrimSpace(data.Text) == "" {
 		return fmt.Errorf("agent: completed run has no text")
 	}
-	run, err := c.Store.GetAgentRun(runID)
+	item, err := c.enqueueReply(run, "final", data.Text)
 	if err != nil {
 		return err
 	}
-	content, _ := json.Marshal(map[string]string{"text": data.Text})
-	item, _, err := c.Store.CreateAgentOutboxItem(&store.AgentOutboxItem{
-		ID: uuid.NewString(), RunID: runID, Kind: "final", Recipient: recipient, Content: content, Status: store.AgentOutboxPending,
-	})
-	if err != nil {
-		return err
+	changed, err := c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunCompleted, "", "")
+	if changed && c.Sender != nil {
+		c.deliverOutbox(context.Background(), item)
 	}
-	_, _ = c.Store.TransitionAgentRun(runID, run.Status, store.AgentRunCompleted, "", "")
-	if c.Sender == nil {
-		return nil
-	}
-	changed, err := c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxPending, store.AgentOutboxSending, "", "")
-	if err != nil || !changed {
-		return err
-	}
-	clientID, sendErr := c.Sender.SendAgentReply(context.Background(), run.BotID, recipient, data.Text)
-	if sendErr != nil {
-		_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxFailed, "", sendErr.Error())
-		return sendErr
-	}
-	_, err = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxSent, clientID, "")
 	return err
+}
+
+func (c *Coordinator) interrupt(run *store.AgentRun, fence int64, code, message string) {
+	if code == "" {
+		code = "runtime_interrupted"
+	}
+	item, err := c.enqueueReply(run, "failure", message)
+	changed, _ := c.Store.TransitionAgentRunFenced(run.ID, fence, run.Status, store.AgentRunInterrupted, code, message)
+	if err == nil && changed && c.Sender != nil {
+		c.deliverOutbox(context.Background(), item)
+	}
+}
+
+func (c *Coordinator) enqueueReply(run *store.AgentRun, kind, text string) (*store.AgentOutboxItem, error) {
+	conversation, err := c.Store.GetAgentConversation(run.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	content, _ := json.Marshal(map[string]string{"text": text})
+	id := uuid.NewString()
+	item, _, err := c.Store.CreateAgentOutboxItem(&store.AgentOutboxItem{
+		ID: id, RunID: run.ID, Kind: kind, Recipient: conversation.SenderID, Content: content,
+		ContentRef: "agent-outbox:" + id, Status: store.AgentOutboxPending,
+	})
+	return item, err
 }
 
 func (c *Coordinator) DrainOutbox(ctx context.Context) {
@@ -205,33 +446,59 @@ func (c *Coordinator) DrainOutbox(ctx context.Context) {
 		slog.Error("agent outbox recovery failed", "err", err)
 		return
 	}
-	for _, item := range items {
-		// Failed and sending deliveries have an unknown external effect and are
-		// deliberately left for explicit operator action.
-		if item.Status != store.AgentOutboxPending {
-			continue
-		}
-		var content struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(item.Content, &content) != nil || content.Text == "" {
-			continue
-		}
-		run, err := c.Store.GetAgentRun(item.RunID)
-		if err != nil {
-			continue
-		}
-		changed, err := c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxPending, store.AgentOutboxSending, "", "")
-		if err != nil || !changed {
-			continue
-		}
-		clientID, sendErr := c.Sender.SendAgentReply(ctx, run.BotID, item.Recipient, content.Text)
-		if sendErr != nil {
-			_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxFailed, "", sendErr.Error())
-			continue
-		}
-		_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxSent, clientID, "")
+	for i := range items {
+		c.deliverOutbox(ctx, &items[i])
 	}
+}
+
+func (c *Coordinator) deliverOutbox(parent context.Context, item *store.AgentOutboxItem) {
+	if item.Status == store.AgentOutboxFailed {
+		if !strings.HasPrefix(item.LastError, "known_unsent:") || time.Now().Before(time.Unix(item.UpdatedAt, 0).Add(outboxBackoff(c.OutboxBaseDelay, item.Attempt))) {
+			return
+		}
+	} else if item.Status != store.AgentOutboxPending {
+		return
+	}
+	var content struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(item.Content, &content) != nil || strings.TrimSpace(content.Text) == "" {
+		return
+	}
+	run, err := c.Store.GetAgentRun(item.RunID)
+	if err != nil || (run.Status != store.AgentRunCompleted && run.Status != store.AgentRunInterrupted) {
+		return
+	}
+	changed, err := c.Store.TransitionAgentOutboxItem(item.ID, item.Status, store.AgentOutboxSending, "", "")
+	if err != nil || !changed {
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(parent, 15*time.Second)
+	clientID, sendErr := c.Sender.SendAgentReply(sendCtx, run.BotID, item.Recipient, content.Text)
+	cancel()
+	if sendErr != nil {
+		var known DefinitelyUnsentError
+		if errors.As(sendErr, &known) && known.DefinitelyUnsent() {
+			_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxFailed, "", "known_unsent:"+sendErr.Error())
+		} else {
+			_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxDeliveryBlocked, "", "execution_unknown:"+sendErr.Error())
+		}
+		return
+	}
+	_, _ = c.Store.TransitionAgentOutboxItem(item.ID, store.AgentOutboxSending, store.AgentOutboxSent, clientID, "")
+}
+
+func outboxBackoff(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = 5 * time.Second
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > 6 {
+		attempt = 6
+	}
+	return time.Duration(1<<(attempt-1)) * base
 }
 
 func (c *Coordinator) RunCapability(runID, botID string) string {
@@ -261,7 +528,9 @@ func (c *Coordinator) Cancel(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.Runtime.Cancel(ctx, runID); err != nil {
+	cancelCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := c.Runtime.Cancel(cancelCtx, runID); err != nil {
 		return err
 	}
 	_, err = c.Store.TransitionAgentRun(runID, run.Status, store.AgentRunCancelled, "", "")

@@ -197,11 +197,12 @@ func main() {
 			slog.Error("Pi agent configuration invalid", "err", err)
 			os.Exit(1)
 		}
-		catalog := &agentcore.StoreCatalogResolver{Store: s}
+		policy := &agentcore.StorePolicy{Store: s}
+		catalog := &agentcore.StoreCatalogResolver{Store: s, Policies: policy}
 		transport := agentcore.NewAppTransport(s, appDisp, appWSHub)
-		broker := &agentcore.Broker{Catalog: catalog, Installations: s, Dispatcher: transport, AgentStore: s}
+		broker := &agentcore.Broker{Catalog: catalog, Installations: s, Authorizer: policy, Dispatcher: transport, AgentStore: s}
 		coordinator := &agentcore.Coordinator{
-			Store: s, Runtime: piClient, Catalog: catalog, Sender: mgr,
+			Store: s, Runtime: piClient, Catalog: catalog, Sender: mgr, Policy: policy,
 			ServiceToken: cfg.AgentServiceToken, Timeout: cfg.AgentTimeout, MaxToolCalls: cfg.AgentMaxToolCalls,
 		}
 		mgr.SetAgentCoordinator(coordinator)
@@ -217,7 +218,7 @@ func main() {
 	defer cancel()
 	mgr.StartAll(ctx)
 	if srv.AgentCoordinator != nil {
-		go srv.AgentCoordinator.DrainOutbox(ctx)
+		go srv.AgentCoordinator.Run(ctx)
 	}
 
 	// Periodic cleanup

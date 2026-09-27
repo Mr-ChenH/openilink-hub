@@ -16,6 +16,20 @@ import (
 
 const maxRuntimeResponse = 1 << 20
 
+type RuntimeHTTPError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *RuntimeHTTPError) Error() string {
+	return fmt.Sprintf("agent: Pi HTTP %s: %s", strconv.Itoa(e.StatusCode), e.Message)
+}
+
+func IsRuntimeNotFound(err error) bool {
+	var httpErr *RuntimeHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
+}
+
 // PiClient calls the project-defined Pi sidecar HTTP protocol. Client should
 // have a transport timeout; request contexts remain the authoritative deadline.
 type PiClient struct {
@@ -98,6 +112,7 @@ func (c *PiClient) StreamEvents(ctx context.Context, runID, lastEventID string, 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 4096), maxRuntimeResponse)
 	var data strings.Builder
+	terminal := false
 	flush := func() error {
 		if data.Len() == 0 {
 			return nil
@@ -107,6 +122,7 @@ func (c *PiClient) StreamEvents(ctx context.Context, runID, lastEventID string, 
 			return fmt.Errorf("agent: decode Pi event: %w", err)
 		}
 		data.Reset()
+		terminal = event.Type == "run.completed" || event.Type == "run.failed" || event.Type == "run.cancelled" || event.Type == "run.interrupted"
 		return yield(event)
 	}
 	for scanner.Scan() {
@@ -127,7 +143,13 @@ func (c *PiClient) StreamEvents(ctx context.Context, runID, lastEventID string, 
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("agent: read Pi events: %w", err)
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return err
+	}
+	if !terminal {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 func (c *PiClient) doJSON(ctx context.Context, method, path string, input, output any, expected ...int) error {
@@ -189,5 +211,5 @@ func runtimeHTTPError(resp *http.Response) error {
 	if message == "" {
 		message = http.StatusText(resp.StatusCode)
 	}
-	return fmt.Errorf("agent: Pi HTTP %s: %s", strconv.Itoa(resp.StatusCode), message)
+	return &RuntimeHTTPError{StatusCode: resp.StatusCode, Message: message}
 }

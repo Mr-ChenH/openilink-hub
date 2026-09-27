@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -69,6 +71,19 @@ func TestPiClientStreamEventsReplaysWithoutStartingRun(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sequence, []int64{8}) || requests != 1 {
 		t.Fatalf("sequence=%v requests=%d", sequence, requests)
+	}
+}
+
+func TestPiClientRejectsEOFBeforeTerminalEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: 1\nevent: run.started\ndata: {\"seq\":1,\"run_id\":\"run-1\",\"type\":\"run.started\",\"timestamp\":\"2026-09-27T00:00:00Z\"}\n\n")
+	}))
+	defer server.Close()
+	client, _ := NewPiClient(server.URL, "", server.Client())
+	err := client.StreamEvents(context.Background(), "run-1", "", func(RuntimeEvent) error { return nil })
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("error = %v, want unexpected EOF", err)
 	}
 }
 

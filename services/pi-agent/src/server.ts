@@ -1,12 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as nodeCreateServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import type { ServiceConfig } from "./config.js";
 import { ConflictError, publicRun, RunStore } from "./run-store.js";
 import { RunScheduler } from "./scheduler.js";
 import type { AgentRuntime, RunEvent, RunRecord } from "./types.js";
 import { parseRunRequest, ValidationError } from "./validation.js";
 
-const terminal = new Set(["completed", "failed", "cancelled"]);
+const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -51,7 +52,7 @@ function routeId(pathname: string, suffix = ""): string | undefined {
 }
 
 export function createApp(config: ServiceConfig, runtime: AgentRuntime) {
-  const store = new RunStore(config.eventLimit);
+  const store = new RunStore(config.eventLimit, join(config.sessionDir, "runs.json"));
   const scheduler = new RunScheduler(store, runtime, config);
 
   const server = nodeCreateServer(async (request, response) => {

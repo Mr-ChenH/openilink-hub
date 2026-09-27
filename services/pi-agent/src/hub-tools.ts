@@ -7,6 +7,7 @@ interface HubToolResponse {
   output?: unknown;
   text?: string;
   error?: { code?: string; message?: string };
+  confirmation_id?: string;
 }
 
 async function readLimited(response: Response, limit: number): Promise<string> {
@@ -49,39 +50,66 @@ export function createHubTools(options: {
       options.onStarted(toolCallId, tool.name);
       const timeout = AbortSignal.timeout(options.timeoutMs);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      let activeSignal = combined;
+      let awaitingConfirmation = false;
       let isError = true;
       try {
-        const response = await fetch(
-          `${options.hubBaseUrl}/runs/${encodeURIComponent(options.request.run_id)}/tool-calls`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${options.serviceToken}`,
-              "content-type": "application/json",
-              "x-agent-run-capability": options.request.tool_capability ?? "",
+        while (true) {
+          const response = await fetch(
+            `${options.hubBaseUrl}/runs/${encodeURIComponent(options.request.run_id)}/tool-calls`,
+            {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${options.serviceToken}`,
+                "content-type": "application/json",
+                "x-agent-run-capability": options.request.tool_capability ?? "",
+              },
+              body: JSON.stringify({
+                call_id: toolCallId,
+                tool_name: tool.name,
+                catalog_version: options.request.catalog_version,
+                arguments: params,
+              }),
+              signal: activeSignal,
             },
-            body: JSON.stringify({
-              call_id: toolCallId,
-              tool_name: tool.name,
-              catalog_version: options.request.catalog_version,
-              arguments: params,
-            }),
-            signal: combined,
-          },
-        );
-        const raw = await readLimited(response, 32 * 1024);
-        let body: HubToolResponse;
-        try {
-          body = raw ? (JSON.parse(raw) as HubToolResponse) : {};
-        } catch {
-          throw new Error(`Hub returned invalid JSON (${response.status})`);
+          );
+          const raw = await readLimited(response, 32 * 1024);
+          let body: HubToolResponse;
+          try {
+            body = raw ? (JSON.parse(raw) as HubToolResponse) : {};
+          } catch {
+            throw new Error(`Hub returned invalid JSON (${response.status})`);
+          }
+          if (response.status === 409 && body.error?.code === "confirmation_required" && body.confirmation_id) {
+            if (!awaitingConfirmation) {
+              awaitingConfirmation = true;
+              const confirmationTimeout = AbortSignal.timeout(10 * 60 * 1000 + 5000);
+              activeSignal = signal ? AbortSignal.any([signal, confirmationTimeout]) : confirmationTimeout;
+            }
+            await new Promise<void>((resolve, reject) => {
+              if (activeSignal.aborted) {
+                reject(activeSignal.reason);
+                return;
+              }
+              const onAbort = () => {
+                clearTimeout(timer);
+                reject(activeSignal.reason);
+              };
+              const timer = setTimeout(() => {
+                activeSignal.removeEventListener("abort", onAbort);
+                resolve();
+              }, 1000);
+              activeSignal.addEventListener("abort", onAbort, { once: true });
+            });
+            continue;
+          }
+          if (!response.ok || body.status === "failed") {
+            throw new Error(body.error?.message ?? `Hub tool request failed (${response.status})`);
+          }
+          isError = false;
+          const text = body.text ?? (body.output === undefined ? "Tool completed successfully" : JSON.stringify(body.output));
+          return { content: [{ type: "text", text }], details: { status: body.status ?? "succeeded" } };
         }
-        if (!response.ok || body.status === "failed") {
-          throw new Error(body.error?.message ?? `Hub tool request failed (${response.status})`);
-        }
-        isError = false;
-        const text = body.text ?? (body.output === undefined ? "Tool completed successfully" : JSON.stringify(body.output));
-        return { content: [{ type: "text", text }], details: { status: body.status ?? "succeeded" } };
       } finally {
         options.onCompleted(toolCallId, tool.name, isError);
       }

@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +56,13 @@ func (s *Server) handleAgentToolCall(w http.ResponseWriter, r *http.Request) {
 				status = http.StatusGatewayTimeout
 			}
 		}
-		writeJSON(w, status, map[string]any{"status": "failed", "error": map[string]string{"code": code, "message": err.Error()}})
+		body := map[string]any{"status": "failed", "error": map[string]string{"code": code, "message": err.Error()}}
+		if code == agent.CodeConfirmationNeeded {
+			if call, lookupErr := s.Store.GetAgentToolCall(runID, req.CallID); lookupErr == nil && call.Status == store.AgentToolAwaitingConfirmation {
+				body["confirmation_id"] = call.ConfirmationID
+			}
+		}
+		writeJSON(w, status, body)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -114,6 +118,14 @@ func (s *Server) handleAgentSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := &store.BotAgentSettings{BotID: bot.ID, ProfileID: req.ProfileID, RoutingMode: req.RoutingMode, TriggerPolicy: req.TriggerPolicy, ToolPolicy: req.ToolPolicy}
 	normalizeBotAgentSettings(settings)
+	if _, err := agent.ParseTriggerPolicy(settings.TriggerPolicy); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := agent.ParseToolPolicy(settings.ToolPolicy); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := s.Store.PutBotAgentSettings(settings); err != nil {
 		jsonError(w, "save settings failed", http.StatusInternalServerError)
 		return
@@ -211,7 +223,7 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	for i := range calls {
 		callViews[i] = agentToolCallView{
 			ID: calls[i].ID, ToolName: calls[i].ToolName, Effect: calls[i].Effect,
-			Status: calls[i].Status, ErrorCode: calls[i].ErrorCode,
+			Status: calls[i].Status, ErrorCode: calls[i].ErrorCode, ConfirmationID: calls[i].ConfirmationID,
 			CreatedAt: calls[i].CreatedAt, UpdatedAt: calls[i].UpdatedAt,
 		}
 	}
@@ -282,30 +294,32 @@ func (s *Server) handleAgentConfirm(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "confirmation not found", http.StatusNotFound)
 		return
 	}
+	if confirmation.RunID != run.ID {
+		jsonError(w, "confirmation not found", http.StatusNotFound)
+		return
+	}
 	call, err := s.Store.GetAgentToolCall(run.ID, confirmation.CallID)
 	if err != nil {
 		jsonError(w, "tool call not found", http.StatusNotFound)
 		return
 	}
-	conversation, err := s.Store.GetAgentConversation(run.ConversationID)
-	if err != nil {
-		jsonError(w, "conversation not found", http.StatusNotFound)
-		return
-	}
 	var req struct {
-		Code string `json:"code"`
+		Decision string `json:"decision"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Code == "" {
-		jsonError(w, "code required", http.StatusBadRequest)
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonError(w, "decision required", http.StatusBadRequest)
 		return
 	}
-	sum := sha256.Sum256([]byte(req.Code))
-	consumed, err := s.Store.ConsumeAgentConfirmation(confirmation.ID, conversation.SenderID, hex.EncodeToString(sum[:]), call.ArgsHash, time.Now().Unix())
-	if err != nil || !consumed {
-		jsonError(w, "confirmation invalid or expired", http.StatusConflict)
+	if req.Decision != "approve" && req.Decision != "deny" {
+		jsonError(w, "decision must be approve or deny", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	resolved, err := s.Store.ResolveAgentToolConfirmation(confirmation.ID, run.ID, call.ID, auth.UserIDFromContext(r.Context()), call.ArgsHash, req.Decision, time.Now().Unix())
+	if err != nil || !resolved {
+		jsonError(w, "confirmation invalid, expired, or already used", http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "decision": req.Decision})
 }
 
 func (s *Server) handleAgentProfileList(w http.ResponseWriter, r *http.Request) {
@@ -434,13 +448,14 @@ type agentRunEventView struct {
 }
 
 type agentToolCallView struct {
-	ID        string `json:"id"`
-	ToolName  string `json:"tool_name"`
-	Effect    string `json:"effect"`
-	Status    string `json:"status"`
-	ErrorCode string `json:"error_code,omitempty"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID             string `json:"id"`
+	ToolName       string `json:"tool_name"`
+	Effect         string `json:"effect"`
+	Status         string `json:"status"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ConfirmationID string `json:"confirmation_id,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 func (s *Server) agentRuntimeAvailable() bool {

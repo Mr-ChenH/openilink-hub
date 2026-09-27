@@ -234,6 +234,25 @@ func (db *DB) ListAgentRunsByBot(botID string, beforeCreatedAt int64, beforeID s
 	}
 	return out, rows.Err()
 }
+func (db *DB) ListNonterminalAgentRuns(limit int) ([]store.AgentRun, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.agentQuery(`SELECT `+runCols+` FROM agent_runs WHERE status IN ('queued','running','waiting_tool','waiting_confirmation') ORDER BY created_at,id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AgentRun
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
 func (db *DB) TransitionAgentRun(id, from, to, code, message string) (bool, error) {
 	if !store.ValidAgentRunTransition(from, to) {
 		return false, fmt.Errorf("invalid agent run transition %s -> %s", from, to)
@@ -259,6 +278,30 @@ func (db *DB) TransitionAgentRun(id, from, to, code, message string) (bool, erro
 	}
 	return n == 1, nil
 }
+func (db *DB) TransitionAgentRunFenced(id string, fence int64, from, to, code, message string) (bool, error) {
+	if !store.ValidAgentRunTransition(from, to) {
+		return false, fmt.Errorf("invalid agent run transition %s -> %s", from, to)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(pgAgentQuery(`UPDATE agent_runs SET status=?,error_code=?,error_message=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND status=? AND fence=?`), to, code, message, id, from, fence)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 1 && to == store.AgentRunCompleted {
+		if _, err = tx.Exec(pgAgentQuery(`UPDATE agent_conversations SET last_completed_run_id=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=(SELECT conversation_id FROM agent_runs WHERE id=?)`), id, id); err != nil {
+			return false, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
 func (db *DB) AcquireAgentRunLease(id, owner string, now, until int64) (int64, bool, error) {
 	var fence int64
 	err := db.agentQueryRow(`UPDATE agent_runs SET lease_owner=?,lease_until=?,fence=fence+1,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND status IN ('queued','running','waiting_tool','waiting_confirmation') AND (lease_until<=? OR lease_owner=?) RETURNING fence`, owner, until, id, now, owner).Scan(&fence)
@@ -267,13 +310,21 @@ func (db *DB) AcquireAgentRunLease(id, owner string, now, until int64) (int64, b
 	}
 	return fence, err == nil, err
 }
+func (db *DB) RenewAgentRunLease(id, owner string, fence, until int64) (bool, error) {
+	res, err := db.agentExec(`UPDATE agent_runs SET lease_until=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND lease_owner=? AND fence=? AND status IN ('queued','running','waiting_tool','waiting_confirmation')`, until, id, owner, fence)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
 
-const callCols = `id,run_id,installation_id,tool_name,arguments,args_hash,schema_hash,effect,status,attempt,result,result_ref,error_code,error_message,created_at,updated_at`
+const callCols = `id,run_id,installation_id,tool_name,arguments,args_hash,schema_hash,effect,status,attempt,result,result_ref,error_code,error_message,confirmation_id,created_at,updated_at`
 
 func scanCall(row interface{ Scan(...any) error }) (*store.AgentToolCall, error) {
 	var c store.AgentToolCall
 	var args, result string
-	err := row.Scan(&c.ID, &c.RunID, &c.InstallationID, &c.ToolName, &args, &c.ArgsHash, &c.SchemaHash, &c.Effect, &c.Status, &c.Attempt, &result, &c.ResultRef, &c.ErrorCode, &c.ErrorMessage, &c.CreatedAt, &c.UpdatedAt)
+	err := row.Scan(&c.ID, &c.RunID, &c.InstallationID, &c.ToolName, &args, &c.ArgsHash, &c.SchemaHash, &c.Effect, &c.Status, &c.Attempt, &result, &c.ResultRef, &c.ErrorCode, &c.ErrorMessage, &c.ConfirmationID, &c.CreatedAt, &c.UpdatedAt)
 	c.Arguments = json.RawMessage(args)
 	c.Result = json.RawMessage(result)
 	return &c, err
@@ -337,12 +388,12 @@ func (db *DB) CreateAgentConfirmation(c *store.AgentConfirmation) error {
 	if c.ID == "" {
 		c.ID = uuid.NewString()
 	}
-	_, err := db.agentExec(`INSERT INTO agent_confirmations (id,call_id,sender_id,code_hash,args_hash,expires_at) VALUES (?,?,?,?,?,?)`, c.ID, c.CallID, c.SenderID, c.CodeHash, c.ArgsHash, c.ExpiresAt)
+	_, err := db.agentExec(`INSERT INTO agent_confirmations (id,run_id,call_id,owner_id,sender_id,code_hash,args_hash,decision,expires_at) VALUES (?,?,?,?,?,?,?,?,?)`, c.ID, c.RunID, c.CallID, c.OwnerID, c.SenderID, c.CodeHash, c.ArgsHash, c.Decision, c.ExpiresAt)
 	return err
 }
 func (db *DB) GetAgentConfirmation(id string) (*store.AgentConfirmation, error) {
 	var c store.AgentConfirmation
-	err := db.agentQueryRow(`SELECT id,call_id,sender_id,code_hash,args_hash,expires_at,used_at,created_at FROM agent_confirmations WHERE id=?`, id).Scan(&c.ID, &c.CallID, &c.SenderID, &c.CodeHash, &c.ArgsHash, &c.ExpiresAt, &c.UsedAt, &c.CreatedAt)
+	err := db.agentQueryRow(`SELECT id,run_id,call_id,owner_id,sender_id,code_hash,args_hash,decision,expires_at,used_at,created_at FROM agent_confirmations WHERE id=?`, id).Scan(&c.ID, &c.RunID, &c.CallID, &c.OwnerID, &c.SenderID, &c.CodeHash, &c.ArgsHash, &c.Decision, &c.ExpiresAt, &c.UsedAt, &c.CreatedAt)
 	return &c, err
 }
 func (db *DB) ConsumeAgentConfirmation(id, sender, code, args string, now int64) (bool, error) {
@@ -354,6 +405,109 @@ func (db *DB) ConsumeAgentConfirmation(id, sender, code, args string, now int64)
 	return n == 1, nil
 }
 
+func (db *DB) AwaitAgentToolConfirmation(runID, callID string, c *store.AgentConfirmation) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	c.RunID, c.CallID = runID, callID
+	res, err := tx.Exec(pgAgentQuery(`UPDATE agent_tool_calls SET status='awaiting_confirmation',confirmation_id=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE run_id=? AND id=? AND status='created'`), c.ID, runID, callID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	res, err = tx.Exec(pgAgentQuery(`UPDATE agent_runs SET status='waiting_confirmation',updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND status IN ('running','waiting_tool')`), runID)
+	if err != nil {
+		return false, err
+	}
+	n, _ = res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	_, err = tx.Exec(pgAgentQuery(`INSERT INTO agent_confirmations (id,run_id,call_id,owner_id,sender_id,code_hash,args_hash,decision,expires_at) VALUES (?,?,?,?,?,?,?,?,?)`), c.ID, runID, callID, c.OwnerID, c.SenderID, c.CodeHash, c.ArgsHash, "", c.ExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func (db *DB) ResolveAgentToolConfirmation(id, runID, callID, ownerID, argsHash, decision string, now int64) (bool, error) {
+	if decision != "approve" && decision != "deny" {
+		return false, fmt.Errorf("invalid confirmation decision")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(pgAgentQuery(`UPDATE agent_confirmations SET used_at=?,decision=? WHERE id=? AND run_id=? AND call_id=? AND owner_id=? AND args_hash=? AND used_at=0 AND expires_at>=?`), now, decision, id, runID, callID, ownerID, argsHash, now)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	status, code, message := store.AgentToolAuthorized, "", ""
+	if decision == "deny" {
+		status, code, message = store.AgentToolFailed, "permission_denied", "confirmation denied"
+	}
+	res, err = tx.Exec(pgAgentQuery(`UPDATE agent_tool_calls SET status=?,error_code=?,error_message=?,updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE run_id=? AND id=? AND status='awaiting_confirmation' AND confirmation_id=?`), status, code, message, runID, callID, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ = res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	res, err = tx.Exec(pgAgentQuery(`UPDATE agent_runs SET status='running',updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND status='waiting_confirmation'`), runID)
+	if err != nil {
+		return false, err
+	}
+	n, _ = res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	return true, tx.Commit()
+}
+
+func (db *DB) ExpireAgentToolConfirmation(id, runID, callID string, now int64) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(pgAgentQuery(`UPDATE agent_confirmations SET used_at=?,decision='deny' WHERE id=? AND run_id=? AND call_id=? AND used_at=0 AND expires_at<?`), now, id, runID, callID, now)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	res, err = tx.Exec(pgAgentQuery(`UPDATE agent_tool_calls SET status='timed_out',error_code='confirmation_expired',error_message='confirmation expired',updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE run_id=? AND id=? AND status='awaiting_confirmation' AND confirmation_id=?`), runID, callID, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ = res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	res, err = tx.Exec(pgAgentQuery(`UPDATE agent_runs SET status='running',updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=? AND status='waiting_confirmation'`), runID)
+	if err != nil {
+		return false, err
+	}
+	n, _ = res.RowsAffected()
+	if n != 1 {
+		return false, nil
+	}
+	return true, tx.Commit()
+}
+
 func (db *DB) AppendAgentRunEvent(e *store.AgentRunEvent) (bool, error) {
 	res, err := db.agentExec(`INSERT INTO agent_run_events (run_id,seq,event_type,sanitized_payload) VALUES (?,?,?,?) ON CONFLICT(run_id,seq) DO NOTHING`, e.RunID, e.Seq, e.EventType, jsonText(e.SanitizedPayload))
 	if err != nil {
@@ -363,6 +517,27 @@ func (db *DB) AppendAgentRunEvent(e *store.AgentRunEvent) (bool, error) {
 	if n == 0 {
 		var typ, payload string
 		if err = db.agentQueryRow(`SELECT event_type,sanitized_payload FROM agent_run_events WHERE run_id=? AND seq=?`, e.RunID, e.Seq).Scan(&typ, &payload); err != nil {
+			return false, err
+		}
+		if typ != e.EventType || !bytes.Equal([]byte(payload), []byte(jsonText(e.SanitizedPayload))) {
+			return false, fmt.Errorf("agent event idempotency conflict")
+		}
+	}
+	return n == 1, nil
+}
+func (db *DB) AppendAgentRunEventFenced(e *store.AgentRunEvent, fence int64) (bool, error) {
+	res, err := db.agentExec(`INSERT INTO agent_run_events (run_id,seq,event_type,sanitized_payload) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM agent_runs WHERE id=? AND fence=?) ON CONFLICT(run_id,seq) DO NOTHING`, e.RunID, e.Seq, e.EventType, jsonText(e.SanitizedPayload), e.RunID, fence)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		var typ, payload string
+		err = db.agentQueryRow(`SELECT event_type,sanitized_payload FROM agent_run_events WHERE run_id=? AND seq=?`, e.RunID, e.Seq).Scan(&typ, &payload)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		if err != nil {
 			return false, err
 		}
 		if typ != e.EventType || !bytes.Equal([]byte(payload), []byte(jsonText(e.SanitizedPayload))) {

@@ -60,7 +60,8 @@ export function sanitizeEventData(type: string, data: Record<string, unknown>): 
       const text = boundedFinalText(typeof data.text === "string" ? data.text : "");
       return { text };
     }
-    case "run.failed": {
+    case "run.failed":
+    case "run.interrupted": {
       const code = identifier(data.code);
       return { ...(code ? { code } : {}), message: "agent runtime failed" };
     }

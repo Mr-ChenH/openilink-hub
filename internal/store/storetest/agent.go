@@ -154,6 +154,39 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 		t.Fatalf("reused confirmation: ok=%v err=%v", ok, err)
 	}
 
+	confirmationRun, _, err := s.CreateAgentRun(&store.AgentRun{ID: "run-confirmation", ConversationID: conv.ID, BotID: "bot-1", InboundMessageID: "message-confirmation", Runtime: "pi"})
+	if err != nil {
+		t.Fatalf("create confirmation run: %v", err)
+	}
+	if ok, err := s.TransitionAgentRun(confirmationRun.ID, store.AgentRunQueued, store.AgentRunRunning, "", ""); err != nil || !ok {
+		t.Fatalf("start confirmation run: ok=%v err=%v", ok, err)
+	}
+	confirmationCall := &store.AgentToolCall{ID: "call-confirmation", RunID: confirmationRun.ID, InstallationID: "installation-1", ToolName: "write", Arguments: json.RawMessage(`{"value":1}`), ArgsHash: "confirmation-args", SchemaHash: "schema", Effect: "write"}
+	if _, inserted, err := s.CreateAgentToolCall(confirmationCall); err != nil || !inserted {
+		t.Fatalf("create confirmation call: inserted=%v err=%v", inserted, err)
+	}
+	bound := &store.AgentConfirmation{ID: "confirmation-bound", OwnerID: "owner-1", SenderID: conv.SenderID, ArgsHash: confirmationCall.ArgsHash, ExpiresAt: 1000}
+	if ok, err := s.AwaitAgentToolConfirmation(confirmationRun.ID, confirmationCall.ID, bound); err != nil || !ok {
+		t.Fatalf("await confirmation: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.ResolveAgentToolConfirmation(bound.ID, confirmationRun.ID, confirmationCall.ID, "attacker", confirmationCall.ArgsHash, "approve", 900); err != nil || ok {
+		t.Fatalf("cross-owner confirmation: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.ResolveAgentToolConfirmation(bound.ID, confirmationRun.ID, confirmationCall.ID, bound.OwnerID, confirmationCall.ArgsHash, "approve", 900); err != nil || !ok {
+		t.Fatalf("resolve confirmation: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.ResolveAgentToolConfirmation(bound.ID, confirmationRun.ID, confirmationCall.ID, bound.OwnerID, confirmationCall.ArgsHash, "approve", 901); err != nil || ok {
+		t.Fatalf("replayed bound confirmation: ok=%v err=%v", ok, err)
+	}
+	resolvedCall, err := s.GetAgentToolCall(confirmationRun.ID, confirmationCall.ID)
+	if err != nil || resolvedCall.Status != store.AgentToolAuthorized || resolvedCall.ConfirmationID != bound.ID {
+		t.Fatalf("resolved call: got=%+v err=%v", resolvedCall, err)
+	}
+	resolvedRun, err := s.GetAgentRun(confirmationRun.ID)
+	if err != nil || resolvedRun.Status != store.AgentRunRunning {
+		t.Fatalf("resolved run: got=%+v err=%v", resolvedRun, err)
+	}
+
 	for _, e := range []store.AgentRunEvent{{RunID: run.ID, Seq: 2, EventType: "tool.completed", SanitizedPayload: result}, {RunID: run.ID, Seq: 1, EventType: "run.started", SanitizedPayload: json.RawMessage(`{}`)}} {
 		if inserted, err := s.AppendAgentRunEvent(&e); err != nil || !inserted {
 			t.Fatalf("append event: inserted=%v err=%v", inserted, err)

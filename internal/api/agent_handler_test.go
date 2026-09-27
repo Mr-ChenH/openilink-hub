@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/openilink/openilink-hub/internal/auth"
 	"github.com/openilink/openilink-hub/internal/store"
@@ -83,6 +84,21 @@ func TestAgentControlPlaneOwnershipAndRunData(t *testing.T) {
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status=%d", resp.StatusCode)
+		}
+	})
+
+	t.Run("settings reject malformed policies", func(t *testing.T) {
+		for name, body := range map[string]map[string]any{
+			"trigger": {"profile_id": ownProfile.ID, "routing_mode": "agent", "trigger_policy": map[string]any{"groups": "yes"}},
+			"tool":    {"profile_id": ownProfile.ID, "routing_mode": "agent", "tool_policy": map[string]any{"default": "bypass"}},
+		} {
+			t.Run(name, func(t *testing.T) {
+				resp := doJSON(t, env.ts, http.MethodPut, "/api/bots/"+bot.ID+"/agent/settings", body, withCookie(env.cookie))
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusBadRequest {
+					t.Fatalf("status=%d", resp.StatusCode)
+				}
+			})
 		}
 	})
 
@@ -182,6 +198,27 @@ func TestAgentControlPlaneOwnershipAndRunData(t *testing.T) {
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status=%d", resp.StatusCode)
+		}
+	})
+
+	t.Run("owner confirmation is bound and one shot", func(t *testing.T) {
+		if ok, err := env.store.TransitionAgentRun(run.ID, store.AgentRunQueued, store.AgentRunRunning, "", ""); err != nil || !ok {
+			t.Fatalf("start run: ok=%v err=%v", ok, err)
+		}
+		confirmation := &store.AgentConfirmation{ID: "confirmation-api", OwnerID: env.user.ID, SenderID: conversation.SenderID, ArgsHash: "args", ExpiresAt: time.Now().Add(time.Minute).Unix()}
+		if ok, err := env.store.AwaitAgentToolConfirmation(run.ID, "call-api", confirmation); err != nil || !ok {
+			t.Fatalf("await confirmation: ok=%v err=%v", ok, err)
+		}
+		path := "/api/bots/" + bot.ID + "/agent/runs/" + run.ID + "/confirmations/" + confirmation.ID
+		resp := doJSON(t, env.ts, http.MethodPost, path, map[string]string{"decision": "approve"}, withCookie(env.cookie))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("approve status=%d", resp.StatusCode)
+		}
+		resp = doJSON(t, env.ts, http.MethodPost, path, map[string]string{"decision": "approve"}, withCookie(env.cookie))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("replay status=%d", resp.StatusCode)
 		}
 	})
 }

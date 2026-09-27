@@ -170,12 +170,13 @@ func TestMessageToPiToolToOutboxEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	catalog := &StoreCatalogResolver{Store: s}
+	policy := &StorePolicy{Store: s}
+	catalog := &StoreCatalogResolver{Store: s, Policies: policy}
 	transport := NewAppTransport(s, appdelivery.NewDispatcher(s), appdelivery.NewWSHub())
-	broker := &Broker{Catalog: catalog, Installations: s, Dispatcher: transport, AgentStore: s}
+	broker := &Broker{Catalog: catalog, Installations: s, Authorizer: policy, Dispatcher: transport, AgentStore: s}
 	runtime := &endToEndRuntime{broker: broker}
 	sender := &captureSender{done: make(chan string, 1)}
-	coordinator := &Coordinator{Store: s, Runtime: runtime, Catalog: catalog, Sender: sender, ServiceToken: "service-secret", Timeout: time.Second, MaxToolCalls: 2}
+	coordinator := &Coordinator{Store: s, Runtime: runtime, Catalog: catalog, Sender: sender, Policy: policy, ServiceToken: "service-secret", Timeout: time.Second, MaxToolCalls: 2}
 
 	accepted, err := coordinator.StartMessage(context.Background(), Inbound{
 		BotID: "bot-1", TenantID: "tenant-1", Provider: "mock", SenderID: "user-1", MessageID: "message-1", Text: "weather?",

@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/openilink/openilink-hub/internal/store"
 )
 
@@ -158,13 +160,11 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 	if tool.Policy == PolicyDeny {
 		return ToolResult{}, brokerError(CodePermissionDenied, "agent: tool policy denies execution", nil)
 	}
-	if tool.Policy == PolicyConfirm {
-		return ToolResult{}, brokerError(CodeConfirmationNeeded, "agent: tool requires confirmation", nil)
-	}
 	authorization := AuthorizationRequest{
 		RunID: request.RunID, CallID: request.CallID, BotID: request.BotID,
 		Tool: tool, Arguments: cloneRaw(arguments),
 	}
+	callStatus := store.AgentToolCreated
 	if b.AgentStore != nil {
 		sum := sha256.Sum256(arguments)
 		call, inserted, err := b.AgentStore.CreateAgentToolCall(&store.AgentToolCall{
@@ -175,6 +175,7 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 		if err != nil {
 			return ToolResult{}, brokerError(CodeInvalidRequest, "agent: conflicting tool call replay", err)
 		}
+		callStatus = call.Status
 		if !inserted {
 			switch call.Status {
 			case store.AgentToolSucceeded:
@@ -183,12 +184,27 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 					return ToolResult{}, err
 				}
 				return result, nil
+			case store.AgentToolAwaitingConfirmation:
+				expired, expireErr := b.AgentStore.ExpireAgentToolConfirmation(call.ConfirmationID, request.RunID, request.CallID, time.Now().Unix())
+				if expireErr != nil {
+					return ToolResult{}, brokerError(CodeInvalidRequest, "agent: confirmation expiry check failed", expireErr)
+				}
+				if expired {
+					return ToolResult{}, brokerError(CodePermissionDenied, "agent: confirmation expired", nil)
+				}
+				return ToolResult{}, brokerError(CodeConfirmationNeeded, "agent: tool requires confirmation", nil)
 			case store.AgentToolDispatched, store.AgentToolUnknown:
 				return ToolResult{}, brokerError(CodeExecutionUnknown, "agent: prior tool execution outcome is unknown", nil)
+			case store.AgentToolFailed, store.AgentToolTimedOut:
+				return ToolResult{}, brokerError(CodePermissionDenied, "agent: tool call is no longer executable", nil)
+			case store.AgentToolCreated, store.AgentToolAuthorized:
 			default:
 				return ToolResult{}, brokerError(CodeInvalidRequest, "agent: tool call replay is not executable", nil)
 			}
 		}
+	}
+	if b.Authorizer == nil && b.AgentStore != nil {
+		return ToolResult{}, brokerError(CodePermissionDenied, "agent: tool authorizer is unavailable", nil)
 	}
 	if b.Authorizer != nil {
 		if err := b.Authorizer.AuthorizeTool(ctx, authorization); err != nil {
@@ -199,10 +215,41 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 			return ToolResult{}, brokerError(CodePermissionDenied, "agent: tool authorization denied", err)
 		}
 	}
+	if tool.Policy == PolicyConfirm && callStatus != store.AgentToolAuthorized {
+		if b.AgentStore == nil {
+			return ToolResult{}, brokerError(CodeConfirmationNeeded, "agent: tool requires confirmation", nil)
+		}
+		run, err := b.AgentStore.GetAgentRun(request.RunID)
+		if err != nil || run.BotID != request.BotID {
+			return ToolResult{}, brokerError(CodePermissionDenied, "agent: confirmation run is invalid", err)
+		}
+		conversation, err := b.AgentStore.GetAgentConversation(run.ConversationID)
+		if err != nil || conversation.BotID != request.BotID {
+			return ToolResult{}, brokerError(CodePermissionDenied, "agent: confirmation owner is invalid", err)
+		}
+		confirmation := &store.AgentConfirmation{
+			ID: uuid.NewString(), RunID: request.RunID, CallID: request.CallID,
+			OwnerID: conversation.TenantID, SenderID: conversation.SenderID,
+			ArgsHash: authorizationHash(arguments), ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+		}
+		changed, err := b.AgentStore.AwaitAgentToolConfirmation(request.RunID, request.CallID, confirmation)
+		if err != nil || !changed {
+			return ToolResult{}, brokerError(CodeInvalidRequest, "agent: could not persist confirmation", err)
+		}
+		return ToolResult{}, brokerError(CodeConfirmationNeeded, "agent: tool requires confirmation", nil)
+	}
 
+	if b.AgentStore != nil && callStatus == store.AgentToolCreated {
+		changed, err := b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolCreated, store.AgentToolAuthorized, nil, "", "", "")
+		if err != nil || !changed {
+			return ToolResult{}, brokerError(CodeInvalidRequest, "agent: could not authorize tool call", err)
+		}
+	}
 	if b.AgentStore != nil {
-		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolCreated, store.AgentToolAuthorized, nil, "", "", "")
-		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolAuthorized, store.AgentToolDispatched, nil, "", "", "")
+		changed, err := b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolAuthorized, store.AgentToolDispatched, nil, "", "", "")
+		if err != nil || !changed {
+			return ToolResult{}, brokerError(CodeExecutionUnknown, "agent: tool dispatch state is uncertain", err)
+		}
 	}
 	result, err := b.Dispatcher.DispatchTool(ctx, DispatchRequest{
 		RunID: request.RunID, CallID: request.CallID, BotID: request.BotID,
@@ -238,6 +285,11 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolDispatched, store.AgentToolSucceeded, encoded, "", "", "")
 	}
 	return result, nil
+}
+
+func authorizationHash(arguments []byte) string {
+	sum := sha256.Sum256(arguments)
+	return hex.EncodeToString(sum[:])
 }
 
 func brokerError(code, message string, err error) error {
