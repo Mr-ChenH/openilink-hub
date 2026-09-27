@@ -32,6 +32,18 @@ type Store struct {
 	eventLogs []store.AppEventLog
 	logSeq    atomic.Int64
 	apiLogs   []store.AppAPILog
+
+	agentProfiles      map[string]*store.AgentProfile
+	botAgentSettings   map[string]*store.BotAgentSettings
+	agentConversations map[string]*store.AgentConversation
+	conversationIndex  map[string]string
+	agentRuns          map[string]*store.AgentRun
+	runIndex           map[string]string
+	agentToolCalls     map[string]*store.AgentToolCall
+	agentConfirmations map[string]*store.AgentConfirmation
+	agentEvents        map[string]map[int64]store.AgentRunEvent
+	agentOutbox        map[string]*store.AgentOutboxItem
+	outboxIndex        map[string]string
 }
 
 // Compile-time check that Store implements store.Store.
@@ -40,11 +52,22 @@ var _ store.Store = (*Store)(nil)
 // New creates a new empty in-memory store.
 func New() *Store {
 	return &Store{
-		bots:          make(map[string]*store.Bot),
-		apps:          make(map[string]*store.App),
-		installations: make(map[string]*store.AppInstallation),
-		tokenIndex:    make(map[string]string),
-		handleIndex:   make(map[string]string),
+		bots:               make(map[string]*store.Bot),
+		apps:               make(map[string]*store.App),
+		installations:      make(map[string]*store.AppInstallation),
+		tokenIndex:         make(map[string]string),
+		handleIndex:        make(map[string]string),
+		agentProfiles:      make(map[string]*store.AgentProfile),
+		botAgentSettings:   make(map[string]*store.BotAgentSettings),
+		agentConversations: make(map[string]*store.AgentConversation),
+		conversationIndex:  make(map[string]string),
+		agentRuns:          make(map[string]*store.AgentRun),
+		runIndex:           make(map[string]string),
+		agentToolCalls:     make(map[string]*store.AgentToolCall),
+		agentConfirmations: make(map[string]*store.AgentConfirmation),
+		agentEvents:        make(map[string]map[int64]store.AgentRunEvent),
+		agentOutbox:        make(map[string]*store.AgentOutboxItem),
+		outboxIndex:        make(map[string]string),
 	}
 }
 

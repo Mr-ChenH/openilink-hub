@@ -18,5 +18,6 @@ type Store interface {
 	WebhookLogStore
 	AppLogStore
 	SessionStore
+	AgentStore
 	io.Closer
 }
