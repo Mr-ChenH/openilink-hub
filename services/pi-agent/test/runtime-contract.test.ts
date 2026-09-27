@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { createHubTools } from "../src/hub-tools.js";
-import { isolatedResourceLoader } from "../src/resource-loader.js";
+import { DEFAULT_PROMPT_VERSION, isolatedResourceLoader } from "../src/resource-loader.js";
 import type { CreateRunRequest } from "../src/types.js";
 
 test("isolated resource loader exposes no host-discovered resources", async () => {
@@ -16,6 +16,8 @@ test("isolated resource loader exposes no host-discovered resources", async () =
   assert.deepEqual(loader.getThemes().themes, []);
   assert.deepEqual(loader.getAgentsFiles().agentsFiles, []);
   assert.deepEqual(loader.getAppendSystemPrompt(), []);
+  assert.deepEqual(loader.getSystemPromptSource(), { path: `builtin:${DEFAULT_PROMPT_VERSION}` });
+  assert.throws(() => isolatedResourceLoader("../../host-file"), /unknown system prompt version/);
 });
 
 test("dynamic tool calls only the fixed Hub broker with service and run credentials", async () => {
@@ -47,6 +49,7 @@ test("dynamic tool calls only the fixed Hub broker with service and run credenti
     session_epoch: 1,
     input: { message_id: "message", text: "lookup" },
     model_profile: "default",
+    system_prompt_version: "messaging-v1",
     catalog_version: "catalog-v1",
     tool_capability: "run-secret",
     tools: [{ name: "app_1_lookup", description: "Lookup", parameters: { type: "object", properties: {} } }],

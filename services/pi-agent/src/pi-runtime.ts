@@ -77,7 +77,7 @@ export class PiRuntime implements AgentRuntime {
           compaction: { enabled: true },
           retry: { enabled: true, maxRetries: 2 },
         }),
-        resourceLoader: isolatedResourceLoader(),
+        resourceLoader: isolatedResourceLoader(request.system_prompt_version),
         noTools: "builtin",
         customTools: tools,
       });

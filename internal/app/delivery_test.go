@@ -26,11 +26,15 @@ type mockLogDB struct {
 	updateDelivered atomic.Int32
 	updateFailed    atomic.Int32
 	lastLogID       int64
+	lastLog         *store.AppEventLog
+	lastResponse    string
+	lastFailure     string
 	createLogErr    error
 }
 
-func (m *mockLogDB) CreateEventLog(_ *store.AppEventLog) (int64, error) {
+func (m *mockLogDB) CreateEventLog(log *store.AppEventLog) (int64, error) {
 	m.createLogCalled.Add(1)
+	m.lastLog = log
 	if m.createLogErr != nil {
 		return 0, m.createLogErr
 	}
@@ -38,13 +42,15 @@ func (m *mockLogDB) CreateEventLog(_ *store.AppEventLog) (int64, error) {
 	return m.lastLogID, nil
 }
 
-func (m *mockLogDB) UpdateEventLogDelivered(_ int64, _ int, _ string, _ int) error {
+func (m *mockLogDB) UpdateEventLogDelivered(_ int64, _ int, body string, _ int) error {
 	m.updateDelivered.Add(1)
+	m.lastResponse = body
 	return nil
 }
 
-func (m *mockLogDB) UpdateEventLogFailed(_ int64, _ string, _ int, _ int) error {
+func (m *mockLogDB) UpdateEventLogFailed(_ int64, message string, _ int, _ int) error {
 	m.updateFailed.Add(1)
+	m.lastFailure = message
 	return nil
 }
 
@@ -403,6 +409,27 @@ func TestDeliverEvent_CreateLogError(t *testing.T) {
 	}
 	if result.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", result.StatusCode)
+	}
+}
+
+func TestDeliverEvent_RedactsToolCallLogBodies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"reply":"private application result"}`))
+	}))
+	defer srv.Close()
+
+	mock := &mockLogDB{}
+	d := newTestDispatcher(mock, srv.Client())
+	inst := &store.AppInstallation{ID: "inst-1", AppID: "app-1", BotID: "bot-1", AppWebhookSecret: "secret", AppWebhookURL: srv.URL}
+	if _, err := d.DeliverEvent(inst, NewEvent("tool_call", map[string]any{"args": map[string]string{"credential": "private"}})); err != nil {
+		t.Fatal(err)
+	}
+	if mock.lastLog == nil {
+		t.Fatal("delivery log was not created")
+	}
+	if mock.lastLog.RequestBody != "" || mock.lastResponse != "" {
+		t.Fatalf("tool payload persisted in logs: request=%q response=%q", mock.lastLog.RequestBody, mock.lastResponse)
 	}
 }
 

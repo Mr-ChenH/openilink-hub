@@ -70,6 +70,76 @@ func TestAppTransportResultIsInstallationBoundAndOnceOnly(t *testing.T) {
 	}
 }
 
+func TestAppTransportCommandParity(t *testing.T) {
+	s := memstore.New()
+	s.AddApp(&store.App{ID: "app-1", Name: "Test", Slug: "test"})
+	s.AddInstallation(&store.AppInstallation{ID: "inst-1", AppID: "app-1", BotID: "bot-1", Enabled: true})
+	request := DispatchRequest{
+		RunID: "run-1", CallID: "call-1", BotID: "bot-1", AppID: "app-1", InstallationID: "inst-1",
+		ToolName: "lookup", Command: "records.lookup", Arguments: json.RawMessage(`{"query":"private"}`),
+	}
+
+	var httpCommand string
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Event struct {
+				Data struct {
+					Command string `json:"command"`
+				} `json:"data"`
+			} `json:"event"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Errorf("decode HTTP dispatch: %v", err)
+		}
+		httpCommand = envelope.Event.Data.Command
+		_ = json.NewEncoder(w).Encode(map[string]string{"reply": "ok"})
+	}))
+	defer httpServer.Close()
+	installation, _ := s.GetInstallation("inst-1")
+	installation.AppWebhookURL = httpServer.URL
+	s.AddInstallation(installation)
+	httpTransport := NewAppTransport(s, appdelivery.NewDispatcher(s), nil)
+	if _, err := httpTransport.DispatchTool(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := appdelivery.NewWSHub()
+	conn := &appdelivery.WSConn{InstID: "inst-1", Send: make(chan []byte, 1)}
+	hub.Register("inst-1", conn)
+	wsTransport := NewAppTransport(s, nil, hub)
+	result := make(chan error, 1)
+	go func() {
+		_, err := wsTransport.DispatchTool(context.Background(), request)
+		result <- err
+	}()
+	var wsEnvelope struct {
+		Data struct {
+			Command string `json:"command"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(<-conn.Send, &wsEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsTransport.ResolveToolResult("inst-1", "call-1", ToolResult{Status: "succeeded", Text: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if httpCommand != "records.lookup" || wsEnvelope.Data.Command != httpCommand {
+		t.Fatalf("commands differ: HTTP=%q WebSocket=%q", httpCommand, wsEnvelope.Data.Command)
+	}
+
+	request.CallID = "call-2"
+	request.Command = ""
+	if _, err := httpTransport.DispatchTool(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if httpCommand != request.ToolName {
+		t.Fatalf("fallback command = %q, want %q", httpCommand, request.ToolName)
+	}
+}
+
 func TestMessageToPiToolToOutboxEndToEnd(t *testing.T) {
 	appServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var envelope map[string]any
@@ -92,7 +162,7 @@ func TestMessageToPiToolToOutboxEndToEnd(t *testing.T) {
 		ID: "inst-1", AppID: "app-1", BotID: "bot-1", Enabled: true,
 		AppName: "Weather", AppSlug: "weather", AppWebhookURL: appServer.URL, AppWebhookSecret: "secret",
 	})
-	profile := &store.AgentProfile{ID: "profile-1", OwnerID: "tenant-1", Runtime: "pi", ModelProfile: "default", Enabled: true}
+	profile := &store.AgentProfile{ID: "profile-1", OwnerID: "tenant-1", Runtime: "pi", ModelProfile: "default", PromptVersion: "messaging-v1", Enabled: true}
 	if err := s.CreateAgentProfile(profile); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +187,12 @@ func TestMessageToPiToolToOutboxEndToEnd(t *testing.T) {
 	case got := <-sender.done:
 		if got != "bot-1:user-1:Pi says: sunny" {
 			t.Fatalf("reply = %q", got)
+		}
+		runtime.mu.Lock()
+		promptVersion := runtime.request.SystemPrompt
+		runtime.mu.Unlock()
+		if promptVersion != profile.PromptVersion {
+			t.Fatalf("system prompt version = %q, want %q", promptVersion, profile.PromptVersion)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for final outbox reply")

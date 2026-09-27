@@ -54,12 +54,12 @@ type DeliveryResult struct {
 
 // eventEnvelope is the JSON structure POSTed to the app's webhook_url.
 type eventEnvelope struct {
-	V              int            `json:"v"`
-	Type           string         `json:"type"`
-	TraceID        string         `json:"trace_id"`
-	InstallationID string         `json:"installation_id"`
-	Bot            envelopBot     `json:"bot"`
-	Event          *Event         `json:"event"`
+	V              int        `json:"v"`
+	Type           string     `json:"type"`
+	TraceID        string     `json:"trace_id"`
+	InstallationID string     `json:"installation_id"`
+	Bot            envelopBot `json:"bot"`
+	Event          *Event     `json:"event"`
 }
 
 type envelopBot struct {
@@ -153,12 +153,18 @@ func (d *Dispatcher) DeliverEvent(inst *store.AppInstallation, event *Event) (*D
 	}
 
 	// Create event log (pending).
+	// Tool-call payloads can contain private model arguments. They remain on
+	// the wire but are never retained in application-visible delivery logs.
+	loggedRequestBody := string(body)
+	if event.Type == "tool_call" {
+		loggedRequestBody = ""
+	}
 	logEntry := &store.AppEventLog{
 		InstallationID: inst.ID,
 		TraceID:        traceID,
 		EventType:      event.Type,
 		EventID:        event.ID,
-		RequestBody:    string(body),
+		RequestBody:    loggedRequestBody,
 	}
 	logID, err := d.logDB().CreateEventLog(logEntry)
 	if err != nil {
@@ -222,9 +228,13 @@ func (d *Dispatcher) DeliverEvent(inst *store.AppInstallation, event *Event) (*D
 	}
 
 	// Update event log.
+	loggedResponse := respStr
+	if event.Type == "tool_call" {
+		loggedResponse = ""
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if logID > 0 {
-			if err := d.logDB().UpdateEventLogDelivered(logID, resp.StatusCode, respStr, durationMs); err != nil {
+			if err := d.logDB().UpdateEventLogDelivered(logID, resp.StatusCode, loggedResponse, durationMs); err != nil {
 				slog.Error("failed to update event log as delivered", "logID", logID, "err", err)
 			}
 		}
@@ -232,7 +242,10 @@ func (d *Dispatcher) DeliverEvent(inst *store.AppInstallation, event *Event) (*D
 			"installation", inst.ID, "trace", traceID,
 			"status", resp.StatusCode, "duration_ms", durationMs)
 	} else {
-		errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respStr)
+		errMsg := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if event.Type != "tool_call" {
+			errMsg += ": " + respStr
+		}
 		d.markFailed(logID, errMsg, 0, durationMs)
 		return result, fmt.Errorf("delivery failed with status %d", resp.StatusCode)
 	}

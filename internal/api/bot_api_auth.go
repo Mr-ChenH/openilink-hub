@@ -71,11 +71,13 @@ func (s *Server) appTokenAuth(next http.Handler) http.Handler {
 		// Read request body for logging (buffer it so handler can re-read)
 		var reqBody string
 		if r.Body != nil {
-			bodyBytes, _ := io.ReadAll(r.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 1024*1024+1))
 			r.Body.Close()
-			reqBody = string(bodyBytes)
-			if len(reqBody) > 4096 {
-				reqBody = reqBody[:4096]
+			if r.URL.Path != "/bot/v1/agent/tool-results" {
+				reqBody = string(bodyBytes)
+				if len(reqBody) > 4096 {
+					reqBody = reqBody[:4096]
+				}
 			}
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
@@ -84,7 +86,7 @@ func (s *Server) appTokenAuth(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), installationKey, inst)
 		r = r.WithContext(ctx)
 
-		// Wrap response writer to capture status code and body
+		// Wrap response writer to capture status code.
 		lw := &loggingResponseWriter{ResponseWriter: w, statusCode: 200}
 
 		// Serve the request
@@ -93,6 +95,8 @@ func (s *Server) appTokenAuth(next http.Handler) http.Handler {
 		// Log the API call
 		traceID := r.Header.Get("X-Trace-Id")
 		duration := time.Since(start)
+		// Response bodies may contain application results or credentials and are
+		// deliberately excluded from persistent API logs.
 		apiLog := &store.AppAPILog{
 			InstallationID: inst.ID,
 			TraceID:        traceID,
@@ -100,7 +104,6 @@ func (s *Server) appTokenAuth(next http.Handler) http.Handler {
 			Path:           r.URL.Path,
 			RequestBody:    reqBody,
 			StatusCode:     lw.statusCode,
-			ResponseBody:   lw.body.String(),
 			DurationMs:     int(duration.Milliseconds()),
 		}
 		if err := s.Store.CreateAPILog(apiLog); err != nil {
@@ -109,11 +112,10 @@ func (s *Server) appTokenAuth(next http.Handler) http.Handler {
 	})
 }
 
-// loggingResponseWriter wraps http.ResponseWriter to capture status code and response body.
+// loggingResponseWriter wraps http.ResponseWriter to capture the status code.
 type loggingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
-	body       bytes.Buffer
 	written    bool
 }
 
@@ -128,15 +130,6 @@ func (lw *loggingResponseWriter) WriteHeader(code int) {
 func (lw *loggingResponseWriter) Write(b []byte) (int, error) {
 	if !lw.written {
 		lw.written = true
-	}
-	// Capture up to 4KB of response body for logging
-	if lw.body.Len() < 4096 {
-		remaining := 4096 - lw.body.Len()
-		if len(b) <= remaining {
-			lw.body.Write(b)
-		} else {
-			lw.body.Write(b[:remaining])
-		}
 	}
 	return lw.ResponseWriter.Write(b)
 }

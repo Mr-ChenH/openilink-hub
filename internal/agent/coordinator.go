@@ -123,12 +123,17 @@ func (c *Coordinator) observe(runID, recipient string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	err := c.Runtime.StreamEvents(ctx, runID, "", func(event RuntimeEvent) error {
+		if event.RunID != "" && event.RunID != runID {
+			return fmt.Errorf("agent: runtime event run mismatch")
+		}
 		payload := event.Data
 		if len(payload) == 0 {
 			payload = json.RawMessage(`{}`)
 		}
-		if _, err := c.Store.AppendAgentRunEvent(&store.AgentRunEvent{RunID: runID, Seq: event.Seq, EventType: event.Type, SanitizedPayload: payload}); err != nil {
-			return err
+		if sanitized, allowed := sanitizeRuntimeEvent(event); allowed {
+			if _, err := c.Store.AppendAgentRunEvent(&store.AgentRunEvent{RunID: runID, Seq: event.Seq, EventType: event.Type, SanitizedPayload: sanitized}); err != nil {
+				return err
+			}
 		}
 		switch event.Type {
 		case "run.started":
@@ -154,6 +159,9 @@ func (c *Coordinator) observe(runID, recipient string) {
 }
 
 func (c *Coordinator) complete(runID, recipient string, payload json.RawMessage) error {
+	if len(payload) > maxRuntimeEventBytes {
+		return fmt.Errorf("agent: completed run payload exceeds limit")
+	}
 	var data struct {
 		Text string `json:"text"`
 	}

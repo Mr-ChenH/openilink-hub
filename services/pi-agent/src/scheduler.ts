@@ -1,3 +1,4 @@
+import { boundedFinalText } from "./event-policy.js";
 import type { ServiceConfig } from "./config.js";
 import { sessionKey } from "./config.js";
 import { RunStore } from "./run-store.js";
@@ -45,6 +46,7 @@ export class RunScheduler {
     run.status = "cancelled";
     run.finishedAt = new Date().toISOString();
     this.store.append(run, "run.cancelled");
+    this.store.scrubTerminal(run);
   }
 
   #pump(): void {
@@ -82,12 +84,13 @@ export class RunScheduler {
           reject(new TimeoutError("run timed out"));
         }, timeoutMs);
       });
-      const text = await Promise.race([handle.result, timeout]);
+      const text = boundedFinalText(await Promise.race([handle.result, timeout]));
       if (run.status === "running") {
         run.status = "completed";
         run.result = { text };
         run.finishedAt = new Date().toISOString();
         this.store.append(run, "run.completed", { text });
+        this.store.scrubTerminal(run);
       }
     } catch (error) {
       if (run.status === "running") {
@@ -96,6 +99,7 @@ export class RunScheduler {
         const timeout = error instanceof TimeoutError;
         run.error = { code: timeout ? "timeout" : "runtime_error", message: timeout ? "run timed out" : "agent runtime failed" };
         this.store.append(run, "run.failed", run.error);
+        this.store.scrubTerminal(run);
       }
     } finally {
       if (timer) clearTimeout(timer);

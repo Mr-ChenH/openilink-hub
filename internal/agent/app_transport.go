@@ -35,6 +35,10 @@ func (t *AppTransport) DispatchTool(ctx context.Context, request DispatchRequest
 	if err != nil || installation == nil || !installation.Enabled || installation.BotID != request.BotID || installation.AppID != request.AppID {
 		return ToolResult{}, &BrokerError{Code: CodePermissionDenied, Message: "agent: installation is no longer authorized", Err: err}
 	}
+	command := request.Command
+	if command == "" {
+		command = request.ToolName
+	}
 	if t.WSHub != nil {
 		conn := t.WSHub.Get(installation.ID)
 		if conn == nil {
@@ -52,7 +56,7 @@ func (t *AppTransport) DispatchTool(ctx context.Context, request DispatchRequest
 			defer func() { t.mu.Lock(); delete(t.pending, request.CallID); t.mu.Unlock() }()
 			err := conn.SendJSON(map[string]any{"type": "tool_call", "data": map[string]any{
 				"run_id": request.RunID, "tool_call_id": request.CallID, "installation_id": installation.ID,
-				"bot_id": request.BotID, "tool_name": request.ToolName, "command": request.Command, "arguments": json.RawMessage(request.Arguments),
+				"bot_id": request.BotID, "tool_name": request.ToolName, "command": command, "arguments": json.RawMessage(request.Arguments),
 			}})
 			if err != nil {
 				return ToolResult{}, &BrokerError{Code: CodeExecutionUnknown, Message: "agent: WebSocket dispatch outcome is unknown", Err: err}
@@ -73,7 +77,7 @@ func (t *AppTransport) DispatchTool(ctx context.Context, request DispatchRequest
 		return ToolResult{}, err
 	}
 	event := appdelivery.NewEvent("tool_call", map[string]any{
-		"run_id": request.RunID, "tool_call_id": request.CallID, "command": request.ToolName,
+		"run_id": request.RunID, "tool_call_id": request.CallID, "command": command,
 		"args": args, "sender": map[string]any{"role": "agent"},
 	})
 	result, err := t.Dispatcher.DeliverEvent(installation, event)

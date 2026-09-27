@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sanitizeEventData } from "./event-policy.js";
 import type { CreateRunRequest, RunEvent, RunRecord } from "./types.js";
 
 export class ConflictError extends Error {}
@@ -47,18 +48,30 @@ export class RunStore {
     return this.#runs.get(id);
   }
 
-  append(run: RunRecord, type: RunEvent["type"], data: Record<string, unknown> = {}): RunEvent {
+  append(run: RunRecord, type: RunEvent["type"], data: Record<string, unknown> = {}): RunEvent | undefined {
+    const sanitized = sanitizeEventData(type, data);
+    if (!sanitized) return undefined;
     const event: RunEvent = {
       seq: (run.events.at(-1)?.seq ?? 0) + 1,
       run_id: run.id,
       type,
       timestamp: new Date().toISOString(),
-      data,
+      data: sanitized,
     };
     run.events.push(event);
     if (run.events.length > this.eventLimit) run.events.splice(0, run.events.length - this.eventLimit);
     for (const listener of this.#listeners.get(run.id) ?? []) listener(event);
     return event;
+  }
+
+  scrubTerminal(run: RunRecord): void {
+    if (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled") return;
+    const { tool_capability: _discardedCapability, ...retained } = run.request;
+    run.request = {
+      ...retained,
+      input: { ...retained.input, text: "" },
+      tools: [],
+    };
   }
 
   observe(id: string, afterSeq: number, listener: (event: RunEvent) => void): { replay: RunEvent[]; close(): void } {

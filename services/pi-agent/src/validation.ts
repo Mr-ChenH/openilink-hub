@@ -41,6 +41,10 @@ export function parseRunRequest(value: unknown): CreateRunRequest {
   });
   const limits = root.limits === undefined ? undefined : object(root.limits, "limits");
   const capability = root.tool_capability;
+  const promptVersion = root.system_prompt_version;
+  if (promptVersion !== undefined && (typeof promptVersion !== "string" || promptVersion.length === 0 || promptVersion.length > 64)) {
+    throw new ValidationError("system_prompt_version must be a non-empty string of at most 64 characters");
+  }
   if (tools.length > 0 && (typeof capability !== "string" || capability.length === 0)) {
     throw new ValidationError("tool_capability is required when tools are present");
   }
@@ -54,6 +58,7 @@ export function parseRunRequest(value: unknown): CreateRunRequest {
       text: string(input.text, "input.text", 100_000),
     },
     model_profile: string(root.model_profile, "model_profile", 128),
+    ...(typeof promptVersion === "string" ? { system_prompt_version: promptVersion } : {}),
     catalog_version: string(root.catalog_version, "catalog_version", 256),
     tools,
     ...(typeof capability === "string" ? { tool_capability: capability } : {}),

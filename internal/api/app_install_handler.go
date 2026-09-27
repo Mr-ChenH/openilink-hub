@@ -187,7 +187,7 @@ func (s *Server) handleVerifyURL(w http.ResponseWriter, r *http.Request) {
 	bodyStr := strings.TrimSpace(string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("verify-url: remote error", "app", app.ID, "url", app.WebhookURL, "status", resp.StatusCode, "body", bodyStr)
+		slog.Error("verify-url: remote error", "app", app.ID, "url", app.WebhookURL, "status", resp.StatusCode)
 		msg := "验证失败：远端返回 HTTP " + strconv.Itoa(resp.StatusCode)
 		if bodyStr != "" {
 			msg += " — " + bodyStr
@@ -200,7 +200,7 @@ func (s *Server) handleVerifyURL(w http.ResponseWriter, r *http.Request) {
 		Challenge string `json:"challenge"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		slog.Error("verify-url: invalid response", "app", app.ID, "url", app.WebhookURL, "body", bodyStr, "err", err)
+		slog.Error("verify-url: invalid response", "app", app.ID, "url", app.WebhookURL, "err", err)
 		jsonError(w, "验证失败：远端返回了无效的响应", http.StatusUnprocessableEntity)
 		return
 	}
@@ -351,8 +351,8 @@ func (s *Server) notifyAppInstalled(app *store.App, inst *store.AppInstallation)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	slog.Info("notify: response", "inst", inst.ID, "status", resp.StatusCode, "body", string(body))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	slog.Info("notify: response", "inst", inst.ID, "status", resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("notify: non-200 response", "inst", inst.ID, "status", resp.StatusCode)
@@ -363,7 +363,7 @@ func (s *Server) notifyAppInstalled(app *store.App, inst *store.AppInstallation)
 		WebhookURL string `json:"webhook_url"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil || result.WebhookURL == "" {
-		slog.Error("notify: no webhook_url in response", "inst", inst.ID, "body", string(body))
+		slog.Error("notify: no webhook_url in response", "inst", inst.ID)
 		return
 	}
 
@@ -494,8 +494,8 @@ func (s *Server) autoVerifyURL(appID, webhookURL string) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	slog.Info("auto-verify: response", "app", appID, "status", resp.StatusCode, "body", string(body))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	slog.Info("auto-verify: response", "app", appID, "status", resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("auto-verify: non-200", "app", appID, "status", resp.StatusCode)
@@ -513,6 +513,6 @@ func (s *Server) autoVerifyURL(appID, webhookURL string) {
 		_ = s.Store.SetAppWebhookVerified(appID, true)
 		slog.Info("auto-verify: success", "app", appID)
 	} else {
-		slog.Error("auto-verify: challenge mismatch", "app", appID, "expected", challenge, "got", result.Challenge)
+		slog.Error("auto-verify: challenge mismatch", "app", appID)
 	}
 }

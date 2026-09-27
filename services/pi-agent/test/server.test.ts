@@ -78,6 +78,7 @@ function run(id: string, conversation = "conv-a", text = "hello"): CreateRunRequ
     session_epoch: 1,
     input: { message_id: `msg-${id}`, text },
     model_profile: "default",
+    system_prompt_version: "messaging-v1",
     catalog_version: "cat-1",
     tools: [],
   };
@@ -156,10 +157,12 @@ test("cancel is idempotent for queued and active runs", async () => {
 });
 
 test("SSE replays events after Last-Event-ID and closes at terminal state", async () => {
-  const { base, runtime } = await app();
+  const { base, runtime, store } = await app();
   await create(base, run("stream"));
   await waitFor(() => runtime.started.length === 1);
-  runtime.started[0]?.callbacks.event("text.delta", { text: "hello" });
+  runtime.started[0]?.callbacks.event("text.delta", { text: "hello", reasoning: "must-not-persist", service_token: "secret" });
+  const emitUntrusted = runtime.started[0]?.callbacks.event as ((type: string, data: Record<string, unknown>) => void) | undefined;
+  emitUntrusted?.("provider.reasoning", { text: "hidden chain of thought" });
   runtime.finish("stream", "hello");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await fetch(`${base}/v1/runs/stream`, { headers: headers() });
@@ -175,6 +178,12 @@ test("SSE replays events after Last-Event-ID and closes at terminal state", asyn
   assert.match(text, /event: text.delta/);
   assert.match(text, /event: run.completed/);
   assert.match(text, /"text":"hello"/);
+  assert.doesNotMatch(text, /must-not-persist|service_token|secret|provider\.reasoning|hidden chain of thought/);
+  const stored = store.get("stream");
+  assert.equal(stored?.request.system_prompt_version, "messaging-v1");
+  assert.equal(stored?.request.input.text, "");
+  assert.equal(stored?.request.tool_capability, undefined);
+  assert.deepEqual(stored?.request.tools, []);
 });
 
 test("validation requires capability for dynamic tools and preserves raw slash text", async () => {
@@ -186,5 +195,6 @@ test("validation requires capability for dynamic tools and preserves raw slash t
   assert.equal((await create(base, request)).status, 202);
   await waitFor(() => runtime.started.length === 1);
   assert.equal(runtime.started[0]?.request.input.text, "/not-an-extension command");
+  assert.equal(runtime.started[0]?.request.system_prompt_version, "messaging-v1");
   runtime.finish("tool-run");
 });

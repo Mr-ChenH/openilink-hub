@@ -13,6 +13,7 @@ export interface CreateRunRequest {
   session_epoch: number;
   input: { message_id: string; text: string };
   model_profile: string;
+  system_prompt_version?: string;
   catalog_version: string;
   tools: ToolSpec[];
   tool_capability?: string;
