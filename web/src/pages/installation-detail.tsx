@@ -8,7 +8,6 @@ import {
   EyeOff,
   Copy,
   Check,
-  ArrowRight,
   Loader2,
   Trash2,
   RefreshCw,
@@ -469,7 +468,14 @@ function TokenSection({ app, inst }: { app: any; inst: any }) {
           return [];
         }
       })();
-  const supportsApprise = installationScopes.includes("message:write");
+  const supportsMessageWrite = installationScopes.includes("message:write");
+  const supportsMessageRead = installationScopes.includes("message:read");
+  const supportsContactRead = installationScopes.includes("contact:read");
+  const supportsBotRead = installationScopes.includes("bot:read");
+  const supportsToolsWrite = installationScopes.includes("tools:write");
+  const wsURL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/bot/v1/ws?token=${token || "<your_token>"}`;
+  const apiBaseURL = `${hubUrl}/bot/v1`;
+  const supportsApprise = supportsMessageWrite;
   const appriseScheme = window.location.protocol === "https:" ? "jsons" : "json";
   const appriseRecipient = (() => {
     try {
@@ -574,8 +580,6 @@ function TokenSection({ app, inst }: { app: any; inst: any }) {
       timeouts.forEach(clearTimeout);
     };
   }, [guideHtml]);
-  const showGenericGuide = !guideText && app.registry === "builtin";
-  const showUsageGuide = guideText || showGenericGuide;
 
   return (
     <div className="space-y-6">
@@ -675,44 +679,129 @@ function TokenSection({ app, inst }: { app: any; inst: any }) {
         </Card>
       ) : null}
 
-      {showGenericGuide ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>接入方式</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <details className="group">
-              <summary className="text-sm font-medium cursor-pointer flex items-center gap-2 select-none">
-                <ArrowRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" />
-                WebSocket 连接
-              </summary>
-              <pre className="mt-2 p-3 rounded-md bg-muted/30 border text-xs font-mono overflow-x-auto whitespace-pre-wrap">
-                {`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/bot/v1/ws?token=${token || "<your_token>"}`}
-              </pre>
-            </details>
+      <Card>
+        <CardHeader>
+          <CardTitle>接入信息</CardTitle>
+          <CardDescription>以下地址和示例已按当前安装实例生成。</CardDescription>
+        </CardHeader>
+        <CardContent className="divide-y">
+          <EndpointGuide
+            title="API 基础地址"
+            description="HTTP 请求使用 Authorization: Bearer <Token> 鉴权。"
+            value={apiBaseURL}
+            onCopy={handleCopy}
+          />
 
-            <details className="group">
-              <summary className="text-sm font-medium cursor-pointer flex items-center gap-2 select-none">
-                <ArrowRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" />
-                HTTP 发消息
-              </summary>
-              <pre className="mt-2 p-3 rounded-md bg-muted/30 border text-xs font-mono overflow-x-auto whitespace-pre-wrap">
-                {`curl -X POST ${hubUrl}/bot/v1/message/send \\\n  -H "Authorization: Bearer ${token || "<your_token>"}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"content":"hello"}'`}
-              </pre>
-            </details>
-          </CardContent>
-        </Card>
-      ) : null}
+          <EndpointGuide
+            title="WebSocket 地址"
+            description={
+              supportsMessageRead
+                ? "使用安装 Token 建立长连接，接收该账号的消息和命令事件。"
+                : "使用安装 Token 建立长连接；接收微信消息还需要 message:read 权限。"
+            }
+            value={wsURL}
+            onCopy={handleCopy}
+          />
 
-      {!showUsageGuide && app.webhook_url ? (
-        <Card>
-          <CardContent>
-            <p className="text-xs text-muted-foreground">
-              事件将推送到 <code className="font-mono">{app.webhook_url}</code>
-            </p>
-          </CardContent>
-        </Card>
-      ) : null}
+          <EndpointGuide
+            title="WebSocket 示例"
+            description="浏览器或 Node.js WebSocket 客户端的最小连接示例。"
+            value={`const ws = new WebSocket("${wsURL}");\nws.onmessage = (event) => console.log(JSON.parse(event.data));\nws.onopen = () => ws.send(JSON.stringify({ type: "ping" }));`}
+            onCopy={handleCopy}
+          />
+
+          {supportsMessageWrite ? (
+            <EndpointGuide
+              title="发送微信消息"
+              description="目标用户需要先向 Bot 发消息，以建立可用的发送上下文。"
+              value={`curl -X POST ${hubUrl}/bot/v1/message/send \\\n  -H "Authorization: Bearer ${token || "<your_token>"}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"to":"<user_id>","type":"text","content":"hello"}'`}
+              onCopy={handleCopy}
+            />
+          ) : null}
+
+          {supportsContactRead ? (
+            <EndpointGuide
+              title="联系人列表"
+              description="返回该账号已记录的联系人，可用于获取发送目标 ID。"
+              value={`curl ${hubUrl}/bot/v1/contact \\\n  -H "Authorization: Bearer ${token || "<your_token>"}"`}
+              onCopy={handleCopy}
+            />
+          ) : null}
+
+          {supportsBotRead ? (
+            <EndpointGuide
+              title="Bot 信息"
+              description="读取当前安装对应的微信 Bot 状态和基本信息。"
+              value={`curl ${hubUrl}/bot/v1/info \\\n  -H "Authorization: Bearer ${token || "<your_token>"}"`}
+              onCopy={handleCopy}
+            />
+          ) : null}
+
+          {supportsToolsWrite ? (
+            <EndpointGuide
+              title="动态工具配置"
+              description="更新当前安装实例暴露给 Hub 的命令和工具定义。"
+              value={`${hubUrl}/bot/v1/installation/tools`}
+              onCopy={handleCopy}
+            />
+          ) : null}
+
+          {app.webhook_url ? (
+            <EndpointGuide
+              title="Webhook 地址"
+              description="Hub 会将订阅事件推送到此地址，并使用 webhook secret 签名。"
+              value={app.webhook_url}
+              onCopy={handleCopy}
+            />
+          ) : null}
+
+          {!supportsMessageWrite &&
+          !supportsContactRead &&
+          !supportsBotRead &&
+          !supportsToolsWrite ? (
+            <div className="py-4 text-sm text-muted-foreground">
+              当前安装没有 Bot API 权限。请在应用权限中声明所需 scope 后重新授权。
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function EndpointGuide({
+  title,
+  description,
+  value,
+  onCopy,
+}: {
+  title: string;
+  description: string;
+  value: string;
+  onCopy: (value: string) => void;
+}) {
+  return (
+    <div className="py-4 first:pt-0 last:pb-0 space-y-2">
+      <div>
+        <h3 className="text-sm font-medium">{title}</h3>
+        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+      </div>
+      <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-3">
+        <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-all text-xs font-mono">
+          {value}
+        </pre>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          className="shrink-0"
+          onClick={() => onCopy(value)}
+          aria-label={`复制${title}`}
+          title={`复制${title}`}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </div>
   );
 }
