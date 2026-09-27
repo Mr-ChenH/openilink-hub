@@ -12,8 +12,8 @@ import (
 
 type WSHub struct {
 	mu       sync.RWMutex
-	conns    map[string]*WSConn   // installation_id → conn
-	appConns map[string]*WSConn   // app_id → conn (app-level WS)
+	conns    map[string]*WSConn // installation_id → conn
+	appConns map[string]*WSConn // app_id → conn (app-level WS)
 }
 
 type WSConn struct {
@@ -170,7 +170,7 @@ func (c *WSConn) ReadPump(h ReadPumpHandler) {
 		switch msgType {
 		case "ping":
 			c.SendJSON(map[string]string{"type": "pong"})
-		case "send":
+		case "send", "tool_result":
 			h.HandleAppWSSend(c, msg)
 		default:
 			slog.Warn("ws unknown msg type", "inst", c.InstID, "app", c.AppSlug, "type", msgType)

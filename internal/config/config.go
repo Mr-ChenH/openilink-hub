@@ -3,6 +3,9 @@ package config
 import (
 	"flag"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type Config struct {
@@ -23,10 +26,16 @@ type Config struct {
 	StoragePath      string // local filesystem path (used when S3 is not configured)
 
 	// OAuth providers
-	GitHubClientID     string
-	GitHubClientSecret string
+	GitHubClientID      string
+	GitHubClientSecret  string
 	LinuxDoClientID     string
 	LinuxDoClientSecret string
+
+	// Pi agent sidecar (disabled unless both values are configured).
+	PiAgentURL        string
+	AgentServiceToken string
+	AgentTimeout      time.Duration
+	AgentMaxToolCalls int
 }
 
 func Parse() *Config {
@@ -50,8 +59,33 @@ func Parse() *Config {
 	cfg.GitHubClientSecret = envOr("GITHUB_CLIENT_SECRET", "")
 	cfg.LinuxDoClientID = envOr("LINUXDO_CLIENT_ID", "")
 	cfg.LinuxDoClientSecret = envOr("LINUXDO_CLIENT_SECRET", "")
+	cfg.PiAgentURL = envOr("PI_AGENT_URL", "")
+	cfg.AgentServiceToken = envOr("AGENT_SERVICE_TOKEN", "")
+	if cfg.AgentServiceToken == "" {
+		if path := os.Getenv("AGENT_SERVICE_TOKEN_FILE"); path != "" {
+			if value, err := os.ReadFile(path); err == nil {
+				cfg.AgentServiceToken = strings.TrimSpace(string(value))
+			}
+		}
+	}
+	cfg.AgentTimeout = durationEnv("AGENT_RUN_TIMEOUT", 90*time.Second)
+	cfg.AgentMaxToolCalls = intEnv("AGENT_MAX_TOOL_CALLS", 8)
 	flag.Parse()
 	return cfg
+}
+
+func intEnv(key string, fallback int) int {
+	if value, err := strconv.Atoi(os.Getenv(key)); err == nil && value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	if value, err := time.ParseDuration(os.Getenv(key)); err == nil && value > 0 {
+		return value
+	}
+	return fallback
 }
 
 func envOr(key, fallback string) string {

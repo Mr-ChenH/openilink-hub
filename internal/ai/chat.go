@@ -44,10 +44,10 @@ const MaxToolRounds = 5
 // Message supports text, tool_calls, and tool results.
 type Message struct {
 	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"`     // string or null
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`  // assistant response
+	Content    any        `json:"content,omitempty"`      // string or null
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`   // assistant response
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool result
-	Name       string     `json:"name,omitempty"`        // tool result function name
+	Name       string     `json:"name,omitempty"`         // tool result function name
 }
 
 type toolCall struct {
@@ -74,9 +74,9 @@ type ToolFunction struct {
 }
 
 type chatRequest struct {
-	Model    string        `json:"model"`
+	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
-	Tools    []Tool        `json:"tools,omitempty"`
+	Tools    []Tool    `json:"tools,omitempty"`
 }
 
 type chatUsage struct {
@@ -209,19 +209,31 @@ func ContinueWithToolResults(ctx context.Context, cfg store.AIConfig, messages [
 	return result, messages, err
 }
 
-// BuildMessages builds the conversation message list from history and the current message.
+// BuildMessages builds the conversation message list from channel history.
 func BuildMessages(ctx context.Context, cfg store.AIConfig, s store.MessageStore, channelID, sender, text string, currentImages []ImageData, resolver MediaResolver) []Message {
-	maxHistory := cfg.MaxHistory
-	if maxHistory <= 0 {
-		maxHistory = defaultMaxHistory
-	}
+	history, _ := s.ListChannelMessages(channelID, sender, historyLimit(cfg))
+	return buildMessages(ctx, cfg, history, text, currentImages, resolver)
+}
 
+// BuildMessagesForBot is the bot-level variant used when no channel is attached.
+func BuildMessagesForBot(ctx context.Context, cfg store.AIConfig, s store.MessageStore, botID, sender, text string, currentImages []ImageData, resolver MediaResolver) []Message {
+	history, _ := s.ListMessagesBySender(botID, sender, historyLimit(cfg))
+	return buildMessages(ctx, cfg, history, text, currentImages, resolver)
+}
+
+func historyLimit(cfg store.AIConfig) int {
+	if cfg.MaxHistory > 0 {
+		return cfg.MaxHistory
+	}
+	return defaultMaxHistory
+}
+
+func buildMessages(ctx context.Context, cfg store.AIConfig, history []store.Message, text string, currentImages []ImageData, resolver MediaResolver) []Message {
 	var messages []Message
 	if cfg.SystemPrompt != "" {
 		messages = append(messages, Message{Role: "system", Content: cfg.SystemPrompt})
 	}
 
-	history, _ := s.ListChannelMessages(channelID, sender, maxHistory)
 	for i := len(history) - 1; i >= 0; i-- {
 		m := history[i]
 		if m.Direction == "inbound" {
@@ -357,10 +369,10 @@ func callAPI(ctx context.Context, baseURL, apiKey, model string, messages []Mess
 
 // reservedHeaders are HTTP headers that must not be overridden by custom config.
 var reservedHeaders = map[string]bool{
-	"authorization":    true,
-	"content-type":     true,
-	"content-length":   true,
-	"host":             true,
+	"authorization":     true,
+	"content-type":      true,
+	"content-length":    true,
+	"host":              true,
 	"transfer-encoding": true,
 }
 

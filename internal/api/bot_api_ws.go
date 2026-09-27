@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/openilink/openilink-hub/internal/agent"
 	"github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/provider"
 	"github.com/openilink/openilink-hub/internal/store"
@@ -72,6 +74,10 @@ func (s *Server) handleBotAPIWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // HandleAppWSSend handles a "send" message received over WebSocket.
 func (s *Server) HandleAppWSSend(conn *app.WSConn, msg map[string]any) {
+	if msgType, _ := msg["type"].(string); msgType == "tool_result" {
+		s.handleAppWSToolResult(conn, msg)
+		return
+	}
 	reqID, _ := msg["req_id"].(string)
 	content, _ := msg["content"].(string)
 	to, _ := msg["to"].(string)
@@ -162,6 +168,32 @@ func (s *Server) HandleAppWSSend(conn *app.WSConn, msg map[string]any) {
 
 	slog.Info("app ws send ok", "bot_id", conn.BotID, "client_id", clientID, "to", to)
 	sendAck()
+}
+
+func (s *Server) handleAppWSToolResult(conn *app.WSConn, msg map[string]any) {
+	callID, _ := msg["tool_call_id"].(string)
+	installationID := conn.InstID
+	if strings.HasPrefix(conn.InstID, "app:") {
+		installationID, _ = msg["installation_id"].(string)
+		inst, err := s.Store.GetInstallation(installationID)
+		if err != nil || inst.AppID != strings.TrimPrefix(conn.InstID, "app:") {
+			conn.SendJSON(map[string]any{"type": "error", "tool_call_id": callID, "error": "installation mismatch"})
+			return
+		}
+	}
+	status, _ := msg["status"].(string)
+	text, _ := msg["text"].(string)
+	code, _ := msg["code"].(string)
+	output, _ := json.Marshal(msg["output"])
+	if s.AgentTransport == nil {
+		conn.SendJSON(map[string]any{"type": "error", "tool_call_id": callID, "error": "agent runtime unavailable"})
+		return
+	}
+	if err := s.AgentTransport.ResolveToolResult(installationID, callID, agent.ToolResult{Status: status, Text: text, Code: code, Output: output}); err != nil {
+		conn.SendJSON(map[string]any{"type": "error", "tool_call_id": callID, "error": err.Error()})
+		return
+	}
+	conn.SendJSON(map[string]any{"type": "tool_result_ack", "tool_call_id": callID})
 }
 
 // handleAppLevelWebSocket handles GET /bot/v1/app/ws?app_id={app_id}&secret={webhook_secret}.

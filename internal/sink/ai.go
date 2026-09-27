@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	agentcore "github.com/openilink/openilink-hub/internal/agent"
 	"github.com/openilink/openilink-hub/internal/ai"
 	appdelivery "github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/provider"
@@ -228,7 +229,7 @@ func (s *AI) reply(d Delivery) {
 	}
 
 	// Build messages for conversation context (reused across tool-call rounds)
-	messages := ai.BuildMessages(ctx, cfg, s.Store, d.Channel.ID, sender, text, currentImages, resolver)
+	messages := ai.BuildMessagesForBot(ctx, cfg, s.Store, d.BotDBID, sender, text, currentImages, resolver)
 	result, err := ai.CompleteMessages(ctx, cfg, messages, tools)
 	if err != nil {
 		slog.Error("ai completion failed", "bot", d.BotDBID, "err", err)
@@ -414,42 +415,16 @@ func (s *AI) reply(d Delivery) {
 
 // collectTools gathers all tools from enabled app installations on this bot.
 func (s *AI) collectTools(botID string) []ai.Tool {
-	if s.AppDisp == nil {
-		return nil
-	}
-	installations, err := s.Store.ListInstallationsByBot(botID)
+	catalog, err := (&agentcore.StoreCatalogResolver{Store: s.Store}).ResolveEffectiveTools(context.Background(), botID)
 	if err != nil {
-		slog.Error("ai: list installations failed", "bot", botID, "err", err)
+		slog.Error("ai: resolve tool catalog failed", "bot", botID, "err", err)
 		return nil
 	}
-
-	var tools []ai.Tool
-	for _, inst := range installations {
-		if !inst.Enabled {
-			continue
-		}
-		app, err := s.Store.GetApp(inst.AppID)
-		if err != nil {
-			continue
-		}
-		var appTools []store.AppTool
-		json.Unmarshal(app.Tools, &appTools)
-		for _, t := range appTools {
-			if t.Name == "" {
-				continue
-			}
-			params := t.Parameters
-			params = ensureObjectSchema(params)
-			// Use installation ID as prefix for unique routing
-			tools = append(tools, ai.Tool{
-				Type: "function",
-				Function: ai.ToolFunction{
-					Name:        inst.ID + "__" + t.Name,
-					Description: fmt.Sprintf("[%s] %s", inst.AppName, t.Description),
-					Parameters:  params,
-				},
-			})
-		}
+	tools := make([]ai.Tool, 0, len(catalog.Tools))
+	for _, tool := range catalog.Tools {
+		tools = append(tools, ai.Tool{Type: "function", Function: ai.ToolFunction{
+			Name: tool.ModelName, Description: tool.Description, Parameters: tool.Parameters,
+		}})
 	}
 	return tools
 }
@@ -518,13 +493,22 @@ func ensureObjectSchema(raw json.RawMessage) json.RawMessage {
 
 // executeToolCall delivers a tool call to the corresponding app and returns the result.
 func (s *AI) executeToolCall(ctx context.Context, d Delivery, tc ai.ToolCallRequest, parentSpan *store.SpanBuilder) ai.ToolCallResult {
-	// Parse "installationID__tool_name" format
 	name := tc.Name
 	instID := ""
 	toolName := name
-	if idx := strings.Index(name, "__"); idx >= 0 {
-		instID = name[:idx]
-		toolName = name[idx+2:]
+	catalog, catalogErr := (&agentcore.StoreCatalogResolver{Store: s.Store}).ResolveEffectiveTools(ctx, d.BotDBID)
+	if catalogErr == nil {
+		if tool, ok := catalog.Lookup[name]; ok {
+			instID = tool.InstallationID
+			toolName = tool.Name
+		}
+	}
+	// Accept the legacy name for in-flight native AI requests during upgrades.
+	if instID == "" {
+		if idx := strings.Index(name, "__"); idx >= 0 {
+			instID = name[:idx]
+			toolName = name[idx+2:]
+		}
 	}
 
 	// Create child span for this tool call

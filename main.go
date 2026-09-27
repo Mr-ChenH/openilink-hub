@@ -12,21 +12,22 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
-	appdelivery "github.com/openilink/openilink-hub/internal/app"
+	agentcore "github.com/openilink/openilink-hub/internal/agent"
 	"github.com/openilink/openilink-hub/internal/api"
+	appdelivery "github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/auth"
 	"github.com/openilink/openilink-hub/internal/bot"
 	"github.com/openilink/openilink-hub/internal/builtin"
 	"github.com/openilink/openilink-hub/internal/config"
 	"github.com/openilink/openilink-hub/internal/daemon"
 	"github.com/openilink/openilink-hub/internal/push"
+	"github.com/openilink/openilink-hub/internal/registry"
 	"github.com/openilink/openilink-hub/internal/relay"
 	"github.com/openilink/openilink-hub/internal/sink"
+	"github.com/openilink/openilink-hub/internal/storage"
 	"github.com/openilink/openilink-hub/internal/store"
 	"github.com/openilink/openilink-hub/internal/store/postgres"
 	"github.com/openilink/openilink-hub/internal/store/sqlite"
-	"github.com/openilink/openilink-hub/internal/registry"
-	"github.com/openilink/openilink-hub/internal/storage"
 
 	// Register providers
 	_ "github.com/openilink/openilink-hub/internal/provider/ilink"
@@ -179,20 +180,45 @@ func main() {
 
 	hub := relay.NewHub(srv.SetupUpstreamHandler())
 	appDisp := appdelivery.NewDispatcher(s)
+	appWSHub := api.NewAppWSHub()
 	aiSink := &sink.AI{Store: s, AppDisp: appDisp, Storage: objStore}
 	mgr := bot.NewManager(s, hub, aiSink, objStore, cfg.RPOrigin)
 	aiSink.BotManager = mgr
 	srv.BotManager = mgr
 	srv.Hub = hub
-	srv.AppWSHub = api.NewAppWSHub()
+	srv.AppWSHub = appWSHub
 	srv.PushHub = push.NewHub()
-	mgr.SetAppWSHub(srv.AppWSHub)
+	mgr.SetAppWSHub(appWSHub)
 	mgr.SetPushHub(srv.PushHub)
+
+	if cfg.PiAgentURL != "" && cfg.AgentServiceToken != "" {
+		piClient, err := agentcore.NewPiClient(cfg.PiAgentURL, cfg.AgentServiceToken, &http.Client{})
+		if err != nil {
+			slog.Error("Pi agent configuration invalid", "err", err)
+			os.Exit(1)
+		}
+		catalog := &agentcore.StoreCatalogResolver{Store: s}
+		transport := agentcore.NewAppTransport(s, appDisp, appWSHub)
+		broker := &agentcore.Broker{Catalog: catalog, Installations: s, Dispatcher: transport, AgentStore: s}
+		coordinator := &agentcore.Coordinator{
+			Store: s, Runtime: piClient, Catalog: catalog, Sender: mgr,
+			ServiceToken: cfg.AgentServiceToken, Timeout: cfg.AgentTimeout, MaxToolCalls: cfg.AgentMaxToolCalls,
+		}
+		mgr.SetAgentCoordinator(coordinator)
+		srv.AgentCoordinator = coordinator
+		srv.AgentBroker = broker
+		srv.AgentCatalog = catalog
+		srv.AgentTransport = transport
+		slog.Info("Pi agent integration enabled", "url", cfg.PiAgentURL)
+	}
 
 	// Start all saved bots
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	mgr.StartAll(ctx)
+	if srv.AgentCoordinator != nil {
+		go srv.AgentCoordinator.DrainOutbox(ctx)
+	}
 
 	// Periodic cleanup
 	go func() {

@@ -3,6 +3,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +106,7 @@ type Broker struct {
 	Installations InstallationReader
 	Authorizer    Authorizer
 	Dispatcher    ToolDispatcher
+	AgentStore    store.AgentStore
 }
 
 // Execute resolves the current catalog on every call, preventing a stale model
@@ -162,6 +165,31 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 		RunID: request.RunID, CallID: request.CallID, BotID: request.BotID,
 		Tool: tool, Arguments: cloneRaw(arguments),
 	}
+	if b.AgentStore != nil {
+		sum := sha256.Sum256(arguments)
+		call, inserted, err := b.AgentStore.CreateAgentToolCall(&store.AgentToolCall{
+			ID: request.CallID, RunID: request.RunID, InstallationID: tool.InstallationID,
+			ToolName: tool.Name, Arguments: cloneRaw(arguments), ArgsHash: hex.EncodeToString(sum[:]),
+			SchemaHash: tool.SchemaHash, Effect: string(tool.Execution.Effect), Status: store.AgentToolCreated,
+		})
+		if err != nil {
+			return ToolResult{}, brokerError(CodeInvalidRequest, "agent: conflicting tool call replay", err)
+		}
+		if !inserted {
+			switch call.Status {
+			case store.AgentToolSucceeded:
+				var result ToolResult
+				if err := json.Unmarshal(call.Result, &result); err != nil {
+					return ToolResult{}, err
+				}
+				return result, nil
+			case store.AgentToolDispatched, store.AgentToolUnknown:
+				return ToolResult{}, brokerError(CodeExecutionUnknown, "agent: prior tool execution outcome is unknown", nil)
+			default:
+				return ToolResult{}, brokerError(CodeInvalidRequest, "agent: tool call replay is not executable", nil)
+			}
+		}
+	}
 	if b.Authorizer != nil {
 		if err := b.Authorizer.AuthorizeTool(ctx, authorization); err != nil {
 			var classified *BrokerError
@@ -172,6 +200,10 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 		}
 	}
 
+	if b.AgentStore != nil {
+		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolCreated, store.AgentToolAuthorized, nil, "", "", "")
+		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolAuthorized, store.AgentToolDispatched, nil, "", "", "")
+	}
 	result, err := b.Dispatcher.DispatchTool(ctx, DispatchRequest{
 		RunID: request.RunID, CallID: request.CallID, BotID: request.BotID,
 		AppID: tool.AppID, InstallationID: tool.InstallationID,
@@ -179,9 +211,31 @@ func (b *Broker) Execute(ctx context.Context, request ToolCallRequest) (ToolResu
 		Execution: tool.Execution,
 	})
 	if err != nil {
-		// In particular, write/destructive/unknown failures are returned as-is;
-		// Broker never retries or falls back to a second transport.
+		// A transport error after dispatch cannot prove that a write did not occur.
+		if b.AgentStore != nil {
+			var classified *BrokerError
+			code := CodeExecutionUnknown
+			if errors.As(err, &classified) && classified.Code != "" {
+				code = classified.Code
+			}
+			_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolDispatched, store.AgentToolUnknown, nil, "", code, err.Error())
+		}
 		return ToolResult{}, err
+	}
+	if result.Status == "failed" {
+		err := brokerError(result.Code, result.Text, nil)
+		if result.Code == "" {
+			err = brokerError(CodeExecutionUnknown, "agent: application reported tool failure", nil)
+		}
+		if b.AgentStore != nil {
+			encoded, _ := json.Marshal(result)
+			_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolDispatched, store.AgentToolFailed, encoded, "", result.Code, result.Text)
+		}
+		return ToolResult{}, err
+	}
+	if b.AgentStore != nil {
+		encoded, _ := json.Marshal(result)
+		_, _ = b.AgentStore.TransitionAgentToolCall(request.RunID, request.CallID, store.AgentToolDispatched, store.AgentToolSucceeded, encoded, "", "", "")
 	}
 	return result, nil
 }

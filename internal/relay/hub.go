@@ -16,7 +16,11 @@ type Hub struct {
 	upstreamHandler UpstreamHandler
 }
 
-func NewHub(handler UpstreamHandler) *Hub {
+func NewHub(handlers ...UpstreamHandler) *Hub {
+	var handler UpstreamHandler
+	if len(handlers) > 0 {
+		handler = handlers[0]
+	}
 	return &Hub{
 		conns:           make(map[string]*Conn),
 		upstreamHandler: handler,

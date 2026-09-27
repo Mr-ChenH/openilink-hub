@@ -27,6 +27,7 @@ type RunRequest struct {
 	SystemPrompt    string        `json:"system_prompt_version,omitempty"`
 	CatalogVersion  string        `json:"catalog_version"`
 	Tools           []RuntimeTool `json:"tools"`
+	ToolCapability  string        `json:"tool_capability,omitempty"`
 	Limits          RunLimits     `json:"limits"`
 }
 
@@ -52,8 +53,12 @@ func (c *ToolCatalog) RuntimeTools() []RuntimeTool {
 	}
 	result := make([]RuntimeTool, len(c.Tools))
 	for i, tool := range c.Tools {
+		description := tool.Description
+		if description == "" {
+			description = tool.Name
+		}
 		result[i] = RuntimeTool{
-			Name: tool.ModelName, Description: tool.Description,
+			Name: tool.ModelName, Description: description,
 			Parameters: cloneRaw(tool.Parameters), Execution: tool.Execution, Policy: tool.Policy,
 		}
 	}

@@ -9,6 +9,7 @@ const (
 	RoleSuperAdmin = "superadmin"
 	RoleAdmin      = "admin"
 	RoleMember     = "member"
+	RoleUser       = RoleMember // backward-compatible name for API clients and tests
 
 	StatusActive   = "active"
 	StatusDisabled = "disabled"

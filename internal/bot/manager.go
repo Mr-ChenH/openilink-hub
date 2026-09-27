@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	agentcore "github.com/openilink/openilink-hub/internal/agent"
 	appdelivery "github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/provider"
 	"github.com/openilink/openilink-hub/internal/push"
@@ -34,6 +36,7 @@ type Manager struct {
 	appDisp   *appdelivery.Dispatcher // app event delivery
 	appWSHub  *appdelivery.WSHub      // app WebSocket connections
 	pushHub   *push.Hub               // browser push WebSocket
+	agent     *agentcore.Coordinator  // optional durable Pi agent coordinator
 }
 
 func NewManager(s store.Store, hub *relay.Hub, aiSink *sink.AI, st storage.Store, baseURL string) *Manager {
@@ -47,6 +50,25 @@ func NewManager(s store.Store, hub *relay.Hub, aiSink *sink.AI, st storage.Store
 		dlSem:     make(chan struct{}, maxConcurrentDownloads),
 		appDisp:   appdelivery.NewDispatcher(s),
 	}
+}
+
+func (m *Manager) SetAgentCoordinator(coordinator *agentcore.Coordinator) {
+	m.agent = coordinator
+}
+
+// SendAgentReply implements agent.OutboundSender using the server-resolved bot instance.
+func (m *Manager) SendAgentReply(ctx context.Context, botID, recipient, text string) (string, error) {
+	inst, ok := m.GetInstance(botID)
+	if !ok {
+		return "", fmt.Errorf("bot not connected")
+	}
+	clientID, err := inst.Send(ctx, provider.OutboundMessage{Recipient: recipient, Text: text, ContextToken: m.store.GetLatestContextTokenForRecipient(botID, recipient)})
+	if err != nil {
+		return "", err
+	}
+	items, _ := json.Marshal([]map[string]any{{"type": "text", "text": text}})
+	_, _ = m.store.SaveMessage(&store.Message{BotID: botID, Direction: "outbound", ToUserID: recipient, ClientID: clientID, MessageType: 2, ItemList: items})
+	return clientID, nil
 }
 
 // SetPushHub sets the browser push WebSocket hub.
@@ -343,19 +365,29 @@ func (m *Manager) onInbound(inst *Instance, msg provider.InboundMessage) {
 	// Show typing indicator while delivering.
 	typingDone := m.startTyping(inst, msg)
 
-	// Phase 3: AI + Apps concurrently
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		m.deliverToAI(inst, msg, parsed, msgID, tracer, rootSpan)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// Direct app addressing and Hub commands retain their established owners.
+	trimmed := strings.TrimSpace(parsed.content)
+	if strings.HasPrefix(trimmed, "@") || (strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "/model")) {
 		m.deliverToApps(inst, msg, parsed, tracer, rootSpan)
-	}()
-	wg.Wait()
+	} else if strings.HasPrefix(trimmed, "/model") {
+		m.deliverToAI(inst, msg, parsed, msgID, tracer, rootSpan)
+	} else if m.deliverToAgent(inst, msg, parsed, msgID) {
+		// Pi owns the eventual reply through the durable outbox.
+	} else {
+		// Native AI and app event subscriptions remain compatible when Pi is disabled.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.deliverToAI(inst, msg, parsed, msgID, tracer, rootSpan)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.deliverToApps(inst, msg, parsed, tracer, rootSpan)
+		}()
+		wg.Wait()
+	}
 
 	// Stop typing indicator
 	typingDone()
@@ -550,12 +582,19 @@ func (m *Manager) recoverUnprocessed(inst *Instance) {
 			"message.db_id": msgs[i].ID,
 			"message.id":    msg.ExternalID,
 		})
-		var rwg sync.WaitGroup
-		rwg.Add(1)
-		go func() { defer rwg.Done(); m.deliverToAI(inst, msg, parsed, msgs[i].ID, tracer, rootSpan) }()
-		rwg.Add(1)
-		go func() { defer rwg.Done(); m.deliverToApps(inst, msg, parsed, tracer, rootSpan) }()
-		rwg.Wait()
+		trimmed := strings.TrimSpace(parsed.content)
+		if strings.HasPrefix(trimmed, "@") || (strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "/model")) {
+			m.deliverToApps(inst, msg, parsed, tracer, rootSpan)
+		} else if strings.HasPrefix(trimmed, "/model") {
+			m.deliverToAI(inst, msg, parsed, msgs[i].ID, tracer, rootSpan)
+		} else if !m.deliverToAgent(inst, msg, parsed, msgs[i].ID) {
+			var rwg sync.WaitGroup
+			rwg.Add(1)
+			go func() { defer rwg.Done(); m.deliverToAI(inst, msg, parsed, msgs[i].ID, tracer, rootSpan) }()
+			rwg.Add(1)
+			go func() { defer rwg.Done(); m.deliverToApps(inst, msg, parsed, tracer, rootSpan) }()
+			rwg.Wait()
+		}
 		rootSpan.End()
 		tracer.Flush()
 		m.notifyPush(inst, tracer.TraceID())
@@ -642,6 +681,24 @@ func (m *Manager) downloadMedia(inst *Instance, msg provider.InboundMessage, msg
 		slog.Error("media status update failed", "bot", inst.DBID, "err", err)
 	}
 	slog.Info("media download done", "bot", inst.DBID, "msg", msg.ExternalID, "status", status)
+}
+
+func (m *Manager) deliverToAgent(inst *Instance, msg provider.InboundMessage, p parsedMessage, msgID int64) bool {
+	if m.agent == nil || !m.agent.Enabled(inst.DBID) || p.msgType != "text" || strings.TrimSpace(p.content) == "" {
+		return false
+	}
+	botRecord, err := m.store.GetBot(inst.DBID)
+	if err != nil {
+		return false
+	}
+	accepted, err := m.agent.StartMessage(context.Background(), agentcore.Inbound{
+		BotID: inst.DBID, TenantID: inst.UserID, Provider: botRecord.Provider, SenderID: msg.Sender,
+		GroupID: msg.GroupID, MessageID: agentcore.MessageKey(msg.ExternalID, msgID), Text: p.content,
+	})
+	if err != nil {
+		slog.Error("agent run start failed", "bot", inst.DBID, "message", msgID, "err", err)
+	}
+	return accepted
 }
 
 // deliverToAI runs the AI sink at bot level, independent of channel matching.

@@ -153,7 +153,7 @@ func (r *StoreCatalogResolver) ResolveEffectiveTools(ctx context.Context, botID 
 					return nil, fmt.Errorf("agent: invalid policy %q for tool %q", policy, resolved.definition.Name)
 				}
 			}
-			schema := cloneRaw(resolved.definition.Parameters)
+			schema := normalizeToolSchema(resolved.definition.Parameters)
 			if len(bytes.TrimSpace(schema)) == 0 || bytes.Equal(bytes.TrimSpace(schema), []byte("null")) {
 				schema = json.RawMessage(`{"type":"object","properties":{}}`)
 			}
@@ -256,6 +256,48 @@ func decodeDefinitions(raw json.RawMessage) ([]ToolDefinition, error) {
 		seen[tools[i].Name] = struct{}{}
 	}
 	return tools, nil
+}
+
+func normalizeToolSchema(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return cloneRaw(raw)
+	}
+	var document map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &document) != nil {
+		return cloneRaw(raw)
+	}
+	if _, ok := document["type"]; ok {
+		return cloneRaw(raw)
+	}
+	// The established App API accepted a bare property map. Preserve that
+	// contract while exposing a strict object schema to both AI runtimes.
+	properties := make(map[string]any, len(document))
+	var required []string
+	for name, value := range document {
+		var property map[string]any
+		if json.Unmarshal(value, &property) != nil {
+			properties[name] = value
+			continue
+		}
+		if flag, ok := property["required"].(bool); ok {
+			if flag {
+				required = append(required, name)
+			}
+			delete(property, "required")
+		}
+		properties[name] = property
+	}
+	sort.Strings(required)
+	schema := map[string]any{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return cloneRaw(raw)
+	}
+	return encoded
 }
 
 func validateSchemaDocument(raw json.RawMessage) error {

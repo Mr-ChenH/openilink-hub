@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/openilink/openilink-hub/internal/agent"
 	"github.com/openilink/openilink-hub/internal/app"
 	"github.com/openilink/openilink-hub/internal/auth"
 	"github.com/openilink/openilink-hub/internal/bot"
@@ -17,18 +18,22 @@ import (
 )
 
 type Server struct {
-	Store        store.Store
-	WebAuthn     *webauthn.WebAuthn
-	SessionStore *auth.SessionStore
-	BotManager   *bot.Manager
-	Hub          *relay.Hub
-	Config       *config.Config
-	OAuthStates  *oauthStateStore
-	ObjectStore  storage.Store // optional
-	Registry     *registry.Client
-	AppWSHub     *app.WSHub
-	PushHub      *push.Hub
-	Version      string
+	Store            store.Store
+	WebAuthn         *webauthn.WebAuthn
+	SessionStore     *auth.SessionStore
+	BotManager       *bot.Manager
+	Hub              *relay.Hub
+	Config           *config.Config
+	OAuthStates      *oauthStateStore
+	ObjectStore      storage.Store // optional
+	Registry         *registry.Client
+	AppWSHub         *app.WSHub
+	PushHub          *push.Hub
+	AgentCoordinator *agent.Coordinator
+	AgentBroker      *agent.Broker
+	AgentCatalog     agent.CatalogResolver
+	AgentTransport   *agent.AppTransport
+	Version          string
 }
 
 func cors(next http.Handler) http.Handler {
@@ -105,6 +110,9 @@ func (s *Server) Handler() http.Handler {
 	// --- Registry public endpoint ---
 	mux.HandleFunc("GET /api/registry/v1/apps.json", s.handleRegistryApps)
 
+	// --- Agent runtime callback (service token + run capability auth) ---
+	mux.HandleFunc("POST /internal/agent/v1/runs/{runID}/tool-calls", s.handleAgentToolCall)
+
 	// --- Protected routes ---
 	protected := http.NewServeMux()
 
@@ -139,6 +147,14 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("GET /api/bots/bind/status/{sessionID}", s.handleBindStatus)
 	protected.HandleFunc("POST /api/bots/{id}/reconnect", s.handleReconnect)
 	protected.HandleFunc("DELETE /api/bots/{id}", s.handleDeleteBot)
+
+	protected.HandleFunc("GET /api/bots/{id}/agent/settings", s.handleAgentSettings)
+	protected.HandleFunc("PUT /api/bots/{id}/agent/settings", s.handleAgentSettings)
+	protected.HandleFunc("GET /api/bots/{id}/agent/tools", s.handleAgentTools)
+	protected.HandleFunc("GET /api/bots/{id}/agent/runs/{runID}", s.handleAgentRun)
+	protected.HandleFunc("POST /api/bots/{id}/agent/runs/{runID}/cancel", s.handleAgentCancel)
+	protected.HandleFunc("POST /api/bots/{id}/agent/runs/{runID}/confirmations/{confirmationID}", s.handleAgentConfirm)
+	protected.HandleFunc("POST /api/bots/{id}/agent/conversations/{conversationID}/reset", s.handleAgentReset)
 
 	// Webhook logs
 	protected.HandleFunc("GET /api/bots/{id}/webhook-logs", s.handleWebhookLogs)
@@ -216,6 +232,9 @@ func (s *Server) Handler() http.Handler {
 	// --- Admin: dashboard ---
 	protected.HandleFunc("GET /api/admin/stats", s.requireAdmin(s.handleAdminStats))
 
+	protected.HandleFunc("POST /api/admin/agent/profiles", s.requireAdmin(s.handleAgentProfileCreate))
+	protected.HandleFunc("PUT /api/admin/agent/profiles/{profileID}", s.requireAdmin(s.handleAgentProfileUpdate))
+
 	// --- Admin: webhook plugins ---
 	protected.HandleFunc("PUT /api/admin/webhook-plugins/{id}/review", s.requireAdmin(s.handleReviewPlugin))
 	protected.HandleFunc("DELETE /api/admin/webhook-plugins/{id}", s.requireAdmin(s.handleDeletePlugin))
@@ -264,6 +283,7 @@ func (s *Server) Handler() http.Handler {
 	botAPI.HandleFunc("GET /bot/v1/bot", s.handleBotAPIBotInfo)
 	botAPI.HandleFunc("PUT /bot/v1/app/tools", s.handleBotAPIUpdateTools)
 	botAPI.HandleFunc("PUT /bot/v1/installation/tools", s.handleBotAPIUpdateInstallationTools)
+	botAPI.HandleFunc("POST /bot/v1/agent/tool-results", s.handleBotAPIToolResult)
 	botAPI.HandleFunc("/bot/", s.handleBotAPINotFound)
 	mux.Handle("/bot/", s.appTokenAuth(botAPI))
 
