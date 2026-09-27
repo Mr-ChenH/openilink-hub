@@ -1,7 +1,9 @@
 package storetest
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/openilink/openilink-hub/internal/store"
@@ -30,7 +32,12 @@ func TestAgentStore(t *testing.T, s store.AgentStore) {
 		t.Fatalf("ListAgentProfilesByOwner: got=%+v err=%v", profiles, err)
 	}
 
-	settings := &store.BotAgentSettings{BotID: "bot-agent-1", ProfileID: profile.ID, RoutingMode: "pi", TriggerPolicy: json.RawMessage(`{"private":true}`), ToolPolicy: json.RawMessage(`{"default":"confirm"}`)}
+	settings, err := s.GetBotAgentSettings("missing-bot")
+	if !errors.Is(err, sql.ErrNoRows) || settings != nil {
+		t.Fatalf("missing GetBotAgentSettings: got=%+v err=%v", settings, err)
+	}
+
+	settings = &store.BotAgentSettings{BotID: "bot-agent-1", ProfileID: profile.ID, RoutingMode: "pi", TriggerPolicy: json.RawMessage(`{"private":true}`), ToolPolicy: json.RawMessage(`{"default":"confirm"}`)}
 	if err := s.PutBotAgentSettings(settings); err != nil {
 		t.Fatalf("PutBotAgentSettings: %v", err)
 	}

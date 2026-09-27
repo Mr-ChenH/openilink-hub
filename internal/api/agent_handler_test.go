@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/openilink/openilink-hub/internal/auth"
@@ -98,8 +99,11 @@ func TestAgentControlPlaneOwnershipAndRunData(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.RuntimeAvailable || body.Settings.RoutingMode != "off" {
+		if body.RuntimeAvailable || body.Settings.BotID != bot.ID || body.Settings.RoutingMode != "off" {
 			t.Fatalf("unexpected settings: %+v", body)
+		}
+		if string(body.Settings.TriggerPolicy) != `{}` || string(body.Settings.ToolPolicy) != `{}` {
+			t.Fatalf("default policies are not valid objects: trigger=%s tool=%s", body.Settings.TriggerPolicy, body.Settings.ToolPolicy)
 		}
 	})
 
@@ -180,4 +184,24 @@ func TestAgentControlPlaneOwnershipAndRunData(t *testing.T) {
 			t.Fatalf("status=%d", resp.StatusCode)
 		}
 	})
+}
+
+func TestWriteJSONReportsEncodingFailure(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeJSON(recorder, http.StatusOK, struct {
+		Payload json.RawMessage `json:"payload"`
+	}{Payload: json.RawMessage{}})
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d", response.StatusCode, http.StatusInternalServerError)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body["error"] != "encode response failed" {
+		t.Fatalf("unexpected error response: %+v", body)
+	}
 }

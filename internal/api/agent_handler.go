@@ -71,12 +71,16 @@ func (s *Server) handleAgentSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		settings, err := s.Store.GetBotAgentSettings(bot.ID)
-		if err != nil && !agent.IsNotFound(err) {
-			jsonError(w, "load settings failed", http.StatusInternalServerError)
-			return
-		}
-		if settings == nil {
-			settings = &store.BotAgentSettings{BotID: bot.ID, RoutingMode: "off"}
+		if err != nil {
+			if !agent.IsNotFound(err) {
+				jsonError(w, "load settings failed", http.StatusInternalServerError)
+				return
+			}
+			settings = defaultBotAgentSettings(bot.ID)
+		} else if settings == nil {
+			settings = defaultBotAgentSettings(bot.ID)
+		} else {
+			normalizeBotAgentSettings(settings)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"settings":          settings,
@@ -109,6 +113,7 @@ func (s *Server) handleAgentSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	settings := &store.BotAgentSettings{BotID: bot.ID, ProfileID: req.ProfileID, RoutingMode: req.RoutingMode, TriggerPolicy: req.TriggerPolicy, ToolPolicy: req.ToolPolicy}
+	normalizeBotAgentSettings(settings)
 	if err := s.Store.PutBotAgentSettings(settings); err != nil {
 		jsonError(w, "save settings failed", http.StatusInternalServerError)
 		return
@@ -309,6 +314,9 @@ func (s *Server) handleAgentProfileList(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "load profiles failed", http.StatusInternalServerError)
 		return
 	}
+	for i := range profiles {
+		profiles[i].Limits = defaultJSON(profiles[i].Limits)
+	}
 	writeJSON(w, http.StatusOK, profiles)
 }
 
@@ -320,6 +328,7 @@ func (s *Server) handleAgentProfileCreate(w http.ResponseWriter, r *http.Request
 	}
 	profile.OwnerID = auth.UserIDFromContext(r.Context())
 	profile.Runtime = "pi"
+	profile.Limits = defaultJSON(profile.Limits)
 	if err := s.Store.CreateAgentProfile(&profile); err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
@@ -346,6 +355,7 @@ func (s *Server) handleAgentProfileUpdate(w http.ResponseWriter, r *http.Request
 	req.ID = profile.ID
 	req.OwnerID = profile.OwnerID
 	req.Runtime = "pi"
+	req.Limits = defaultJSON(req.Limits)
 	if err := s.Store.UpdateAgentProfile(&req); err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
@@ -473,8 +483,31 @@ func (s *Server) ownedRun(w http.ResponseWriter, r *http.Request) (*store.AgentR
 	}
 	return run, true
 }
+func defaultJSON(value json.RawMessage) json.RawMessage {
+	if len(value) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return value
+}
+
+func defaultBotAgentSettings(botID string) *store.BotAgentSettings {
+	settings := &store.BotAgentSettings{BotID: botID, RoutingMode: "off"}
+	normalizeBotAgentSettings(settings)
+	return settings
+}
+
+func normalizeBotAgentSettings(settings *store.BotAgentSettings) {
+	settings.TriggerPolicy = defaultJSON(settings.TriggerPolicy)
+	settings.ToolPolicy = defaultJSON(settings.ToolPolicy)
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		jsonError(w, "encode response failed", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(append(body, '\n'))
 }

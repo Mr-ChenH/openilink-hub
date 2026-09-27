@@ -86,10 +86,12 @@ func (db *DB) PutBotAgentSettings(s *store.BotAgentSettings) error {
 func (db *DB) GetBotAgentSettings(id string) (*store.BotAgentSettings, error) {
 	var s store.BotAgentSettings
 	var trigger, tool string
-	err := db.QueryRow(`SELECT bot_id,profile_id,routing_mode,trigger_policy,tool_policy,created_at,updated_at FROM bot_agent_settings WHERE bot_id=?`, id).Scan(&s.BotID, &s.ProfileID, &s.RoutingMode, &trigger, &tool, &s.CreatedAt, &s.UpdatedAt)
+	if err := db.QueryRow(`SELECT bot_id,profile_id,routing_mode,trigger_policy,tool_policy,created_at,updated_at FROM bot_agent_settings WHERE bot_id=?`, id).Scan(&s.BotID, &s.ProfileID, &s.RoutingMode, &trigger, &tool, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		return nil, err
+	}
 	s.TriggerPolicy = json.RawMessage(trigger)
 	s.ToolPolicy = json.RawMessage(tool)
-	return &s, err
+	return &s, nil
 }
 
 func scanConversation(row interface{ Scan(...any) error }) (*store.AgentConversation, error) {
