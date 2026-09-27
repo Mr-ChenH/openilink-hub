@@ -1,0 +1,67 @@
+# Add this overlay to the existing stack only when the Pi runtime is enabled:
+#   docker compose -f docker-compose.yml -f docker-compose.pi.yml up -d
+#
+# Required operator inputs:
+#   PI_AGENT_IMAGE          - immutable sidecar tag or digest (never "latest")
+#   PI_AGENT_MODEL_PROFILES - JSON object keyed by Hub model_profile
+#   ./secrets/agent_service_token
+#   ./secrets/pi-agent/auth.json (and optional models.json)
+
+services:
+  hub:
+    environment:
+      AGENT_PI_URL: http://pi-agent:8080
+      AGENT_SERVICE_TOKEN_FILE: /run/secrets/agent_service_token
+    secrets:
+      - agent_service_token
+
+  pi-agent:
+    image: ${PI_AGENT_IMAGE:?Set PI_AGENT_IMAGE to an immutable tag or digest}
+    restart: unless-stopped
+    init: true
+    expose:
+      - "8080"
+    environment:
+      HUB_AGENT_BASE_URL: http://hub:9800/internal/agent/v1
+      AGENT_SERVICE_TOKEN_FILE: /run/secrets/agent_service_token
+      PI_AGENT_MODEL_PROFILES: ${PI_AGENT_MODEL_PROFILES:?Set PI_AGENT_MODEL_PROFILES to a JSON object}
+      PI_AGENT_DIR: /var/lib/pi-agent/config
+      PI_AGENT_SESSION_DIR: /var/lib/pi-agent/sessions
+      PI_AGENT_WORKSPACE_DIR: /var/lib/pi-agent/workspace
+    secrets:
+      - agent_service_token
+    volumes:
+      - type: bind
+        source: ${PI_AGENT_CONFIG_DIR:-./secrets/pi-agent}
+        target: /var/lib/pi-agent/config
+        read_only: true
+      - pi_agent_sessions:/var/lib/pi-agent/sessions
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/lib/pi-agent/workspace:rw,noexec,nosuid,size=64m
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      hub:
+        condition: service_started
+    stop_grace_period: 15s
+
+volumes:
+  pi_agent_sessions:
+
+secrets:
+  agent_service_token:
+    file: ./secrets/agent_service_token

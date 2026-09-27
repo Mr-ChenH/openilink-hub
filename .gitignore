@@ -29,6 +29,8 @@ docs/plans/
 # Environment
 .env
 .env.*
+/secrets/agent_service_token
+/secrets/pi-agent/
 
 # Runner config (contains app tokens)
 runner.yaml

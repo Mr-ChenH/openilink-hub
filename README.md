@@ -314,7 +314,7 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   hub:
-    image: openilink/openilink-hub:latest  # 或 ghcr.io/openilink/openilink-hub:latest
+    image: openilink/openilink-hub:<固定版本>  # 生产环境使用版本标签或 digest，不要使用 latest
     ports:
       - "9800:9800"
     environment:
@@ -329,7 +329,7 @@ volumes:
   pgdata:
 ```
 
-前面放个 Nginx / Caddy 做 HTTPS 反代就行。
+前面放个 Nginx / Caddy 做 HTTPS 反代就行。可选 Pi Agent sidecar 的生产部署、模型凭据、升级和回退步骤见 [`docs/pi-agent-deployment.md`](docs/pi-agent-deployment.md)。
 
 ### 从源码构建
 
@@ -497,5 +497,7 @@ docker run -d -p 9800:9800 ghcr.io/openilink/openilink-hub:latest     # GHCR
 ```
 
 Visit `http://localhost:9800` — first user becomes admin. Zero config needed.
+
+For the optional Pi Agent runtime, see the [production sidecar deployment guide](docs/pi-agent-deployment.md) for model credentials, immutable image pins, upgrades, and rollback.
 
 **Website:** [openilink.com](https://openilink.com) · **Live Demo:** [hub.openilink.com](https://hub.openilink.com)
